@@ -14,7 +14,7 @@ import UsageFooter from "@/components/UsageFooter";
 import { ProviderHealthBadge } from "@/components/providers/ProviderHealthBadge";
 import { FailoverPriorityBadge } from "@/components/providers/FailoverPriorityBadge";
 import { useProviderHealth } from "@/lib/query/failover";
-import { useUsageQuery } from "@/lib/query/queries";
+import { useCodexQuotaQuery, useUsageQuery } from "@/lib/query/queries";
 
 interface DragHandleProps {
   attributes: DraggableAttributes;
@@ -84,6 +84,19 @@ const extractApiUrl = (provider: Provider, fallbackText: string) => {
   return fallbackText;
 };
 
+const formatResetTime = (resetAt: number) => {
+  if (!resetAt) return "--";
+  const diffMs = resetAt * 1000 - Date.now();
+  if (diffMs <= 0) return "即将重置";
+  const minutes = Math.floor(diffMs / 60000);
+  const hours = Math.floor(minutes / 60);
+  const mins = minutes % 60;
+  if (hours > 0) {
+    return `${hours}h ${mins}m`;
+  }
+  return `${mins}m`;
+};
+
 export function ProviderCard({
   provider,
   isCurrent,
@@ -137,6 +150,7 @@ export function ProviderCard({
   }, [provider.notes, displayUrl, fallbackUrlText]);
 
   const usageEnabled = provider.meta?.usage_script?.enabled ?? false;
+  const isCodexOfficial = appId === "codex" && provider.category === "official";
 
   // 获取用量数据以判断是否有多套餐
   // OpenCode（累加模式）：使用 isInConfig 代替 isCurrent
@@ -148,6 +162,26 @@ export function ProviderCard({
   const { data: usage } = useUsageQuery(provider.id, appId, {
     enabled: usageEnabled,
     autoQueryInterval,
+  });
+
+  // 判断是否是"当前使用中"的供应商
+  // - OpenCode（累加模式）：不存在"当前"概念，始终返回 false
+  // - 故障转移模式：代理实际使用的供应商（activeProviderId）
+  // - 代理接管模式（非故障转移）：isCurrent
+  // - 普通模式：isCurrent
+  const isActiveProvider =
+    appId === "opencode"
+      ? false
+      : isAutoFailoverEnabled
+        ? activeProviderId === provider.id
+        : isCurrent;
+
+  const {
+    data: codexQuota,
+    error: codexQuotaError,
+    isFetching: codexQuotaLoading,
+  } = useCodexQuotaQuery(provider.id, {
+    enabled: isCodexOfficial && isActiveProvider,
   });
 
   const hasMultiplePlans =
@@ -187,18 +221,6 @@ export function ProviderCard({
     }
     onOpenWebsite(displayUrl);
   };
-
-  // 判断是否是"当前使用中"的供应商
-  // - OpenCode（累加模式）：不存在"当前"概念，始终返回 false
-  // - 故障转移模式：代理实际使用的供应商（activeProviderId）
-  // - 代理接管模式（非故障转移）：isCurrent
-  // - 普通模式：isCurrent
-  const isActiveProvider =
-    appId === "opencode"
-      ? false
-      : isAutoFailoverEnabled
-        ? activeProviderId === provider.id
-        : isCurrent;
 
   // 判断是否使用绿色（代理接管模式）还是蓝色（普通模式）
   const shouldUseGreen = isProxyTakeover && isActiveProvider;
@@ -306,6 +328,47 @@ export function ProviderCard({
               >
                 <span className="truncate">{displayUrl}</span>
               </button>
+            )}
+
+            {isCodexOfficial && isActiveProvider && (
+              <div className="flex items-center gap-3 text-xs text-muted-foreground">
+                {codexQuotaLoading ? (
+                  <span>
+                    {t("provider.codexQuotaLoading", {
+                      defaultValue: "正在查询 5h/周用量...",
+                    })}
+                  </span>
+                ) : codexQuotaError ? (
+                  <span className="text-amber-600 dark:text-amber-400">
+                    {t("provider.codexQuotaError", {
+                      defaultValue: "5h/周用量查询失败",
+                    })}
+                  </span>
+                ) : (
+                  <>
+                    <span>
+                      {t("provider.codexQuota5h", {
+                        defaultValue: "5h",
+                      })}
+                      : {codexQuota?.fiveHour?.usedPercent ?? "--"}%
+                    </span>
+                    <span>
+                      {t("provider.codexQuotaWeek", {
+                        defaultValue: "周",
+                      })}
+                      : {codexQuota?.weekly?.usedPercent ?? "--"}%
+                    </span>
+                    {codexQuota?.fiveHour?.resetAt ? (
+                      <span>
+                        {t("provider.codexQuotaReset", {
+                          defaultValue: "重置",
+                        })}
+                        : {formatResetTime(codexQuota.fiveHour.resetAt)}
+                      </span>
+                    ) : null}
+                  </>
+                )}
+              </div>
             )}
           </div>
         </div>

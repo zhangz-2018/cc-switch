@@ -67,6 +67,8 @@ import {
   useGeminiCommonConfig,
 } from "./hooks";
 import { useProvidersQuery } from "@/lib/query/queries";
+import { settingsApi } from "@/lib/api";
+import { codexApi } from "@/lib/api/codex";
 
 const CLAUDE_DEFAULT_CONFIG = JSON.stringify({ env: {} }, null, 2);
 const CODEX_DEFAULT_CONFIG = JSON.stringify({ auth: {}, config: "" }, null, 2);
@@ -94,6 +96,8 @@ const OPENCODE_DEFAULT_CONFIG = JSON.stringify(
   null,
   2,
 );
+
+const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
 type PresetEntry = {
   id: string;
@@ -154,6 +158,8 @@ export function ProviderForm({
   const [isEndpointModalOpen, setIsEndpointModalOpen] = useState(false);
   const [isCodexEndpointModalOpen, setIsCodexEndpointModalOpen] =
     useState(false);
+  const [codexOauthLoading, setCodexOauthLoading] = useState(false);
+  const [codexOauthStatus, setCodexOauthStatus] = useState("");
 
   // 新建供应商：收集端点测速弹窗中的"自定义端点"，提交时一次性落盘到 meta.custom_endpoints
   // 编辑供应商：端点已通过 API 直接保存，不再需要此状态
@@ -200,6 +206,8 @@ export function ProviderForm({
   useEffect(() => {
     setSelectedPresetId(initialData ? null : "custom");
     setActivePreset(null);
+    setCodexOauthStatus("");
+    setCodexOauthLoading(false);
 
     // 编辑模式不需要恢复 draftCustomEndpoints，端点已通过 API 管理
     if (!initialData) {
@@ -302,12 +310,16 @@ export function ProviderForm({
     codexBaseUrl,
     codexModelName,
     codexAuthError,
+    codexAuthMode,
     setCodexAuth,
+    setCodexAuthMode,
+    setCodexOAuthAuth,
     handleCodexApiKeyChange,
     handleCodexBaseUrlChange,
     handleCodexModelNameChange,
     handleCodexConfigChange: originalHandleCodexConfigChange,
     resetCodexConfig,
+    hasCodexOAuthToken,
   } = useCodexConfigState({ initialData });
 
   // 使用 Codex TOML 校验 hook (仅 Codex 模式)
@@ -330,6 +342,90 @@ export function ProviderForm({
       resetCodexConfig(template.auth, template.config);
     }
   }, [appId, initialData, selectedPresetId, resetCodexConfig]);
+
+  const handleCodexOauthLogin = useCallback(async () => {
+    try {
+      setCodexOauthLoading(true);
+      setCodexOauthStatus(
+        t("providerForm.codexOauthInit", { defaultValue: "正在初始化登录流程..." }),
+      );
+
+      const flow = await codexApi.initOAuthDeviceFlow();
+      const verificationUrl =
+        flow.verificationUriComplete || flow.verificationUri;
+
+      await settingsApi.openExternal(verificationUrl);
+      setCodexOauthStatus(
+        t("providerForm.codexOauthWaiting", {
+          defaultValue: `请在浏览器完成授权，验证码：${flow.userCode}`,
+        }),
+      );
+      toast.info(
+        t("providerForm.codexOauthCode", {
+          defaultValue: `请在浏览器输入验证码：${flow.userCode}`,
+        }),
+        { duration: 10000 },
+      );
+
+      const intervalMs = Math.max(flow.interval, 3) * 1000;
+      const deadline = Date.now() + Math.max(flow.expiresIn, 60) * 1000;
+
+      while (Date.now() < deadline) {
+        await sleep(intervalMs);
+        const result = await codexApi.pollOAuthToken(flow.deviceCode);
+
+        if (result.status === "pending") {
+          setCodexOauthStatus(
+            t("providerForm.codexOauthPending", {
+              defaultValue: "等待浏览器确认登录...",
+            }),
+          );
+          continue;
+        }
+
+        if (result.status === "success" && result.authJson) {
+          setCodexOAuthAuth(result.authJson as Record<string, unknown>);
+          setCodexAuthMode("oauth");
+          setCodexOauthStatus(
+            t("providerForm.codexOauthSuccess", {
+              defaultValue: "登录成功，Token 已自动填充",
+            }),
+          );
+          toast.success(
+            t("providerForm.codexOauthSuccess", {
+              defaultValue: "登录成功，Token 已自动填充",
+            }),
+          );
+          return;
+        }
+
+        throw new Error(
+          result.errorDescription ||
+            result.error ||
+            t("providerForm.codexOauthFailed", {
+              defaultValue: "OAuth 登录失败，请重试",
+            }),
+        );
+      }
+
+      throw new Error(
+        t("providerForm.codexOauthTimeout", {
+          defaultValue: "OAuth 登录超时，请重试",
+        }),
+      );
+    } catch (error) {
+      const message =
+        error instanceof Error
+          ? error.message
+          : t("providerForm.codexOauthFailed", {
+              defaultValue: "OAuth 登录失败，请重试",
+            });
+      setCodexOauthStatus(message);
+      toast.error(message);
+    } finally {
+      setCodexOauthLoading(false);
+    }
+  }, [setCodexOAuthAuth, setCodexAuthMode, t]);
 
   useEffect(() => {
     form.reset(defaultValues);
@@ -824,6 +920,27 @@ export function ProviderForm({
       }
     }
 
+    // Codex 官方供应商校验：支持 OAuth 或手动 Token
+    if (appId === "codex" && category === "official") {
+      if (codexAuthMode === "manual" && !codexApiKey.trim()) {
+        toast.error(
+          t("providerForm.apiKeyRequired", {
+            defaultValue: "请填写 API Key",
+          }),
+        );
+        return;
+      }
+
+      if (codexAuthMode === "oauth" && !hasCodexOAuthToken(codexAuth)) {
+        toast.error(
+          t("providerForm.codexOauthNeedLogin", {
+            defaultValue: "请先完成 ChatGPT 登录",
+          }),
+        );
+        return;
+      }
+    }
+
     let settingsConfig: string;
 
     // Codex: 组合 auth 和 config
@@ -1049,6 +1166,8 @@ export function ProviderForm({
       if (appId === "codex") {
         const template = getCodexCustomTemplate();
         resetCodexConfig(template.auth, template.config);
+        setCodexAuthMode("manual");
+        setCodexOauthStatus("");
       }
       // Gemini 自定义模式：重置为空配置
       if (appId === "gemini") {
@@ -1085,6 +1204,8 @@ export function ProviderForm({
 
       // 重置 Codex 配置
       resetCodexConfig(auth, config);
+      setCodexAuthMode(preset.category === "official" ? "oauth" : "manual");
+      setCodexOauthStatus("");
 
       // 更新表单其他字段
       form.reset({
@@ -1305,6 +1426,13 @@ export function ProviderForm({
             websiteUrl={codexWebsiteUrl}
             isPartner={isCodexPartner}
             partnerPromotionKey={codexPartnerPromotionKey}
+            isOfficial={category === "official"}
+            authMode={codexAuthMode}
+            onAuthModeChange={setCodexAuthMode}
+            onOauthLogin={handleCodexOauthLogin}
+            oauthLoading={codexOauthLoading}
+            oauthStatus={codexOauthStatus}
+            hasOauthToken={hasCodexOAuthToken(codexAuth)}
             shouldShowSpeedTest={shouldShowSpeedTest}
             codexBaseUrl={codexBaseUrl}
             onBaseUrlChange={handleCodexBaseUrlChange}

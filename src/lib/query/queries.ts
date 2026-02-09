@@ -8,6 +8,7 @@ import {
   settingsApi,
   usageApi,
   sessionsApi,
+  codexApi,
   type AppId,
 } from "@/lib/api";
 import type {
@@ -143,6 +144,23 @@ export const useUsageQuery = (
     ...query,
     lastQueriedAt: query.dataUpdatedAt || null,
   };
+};
+
+export const useCodexQuotaQuery = (
+  providerId: string,
+  options?: { enabled?: boolean },
+) => {
+  const { enabled = true } = options || {};
+
+  return useQuery({
+    queryKey: ["codex-quota", providerId],
+    queryFn: async () => codexApi.getQuota(providerId),
+    enabled: enabled && !!providerId,
+    refetchInterval: 60 * 1000,
+    refetchOnWindowFocus: false,
+    retry: false,
+    staleTime: 30 * 1000,
+  });
 };
 
 export const useSessionsQuery = () => {

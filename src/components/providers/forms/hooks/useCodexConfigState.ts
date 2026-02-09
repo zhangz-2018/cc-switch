@@ -13,6 +13,8 @@ interface UseCodexConfigStateProps {
   };
 }
 
+export type CodexAuthMode = "oauth" | "manual";
+
 /**
  * 管理 Codex 配置状态
  * Codex 配置包含两部分：auth.json (JSON) 和 config.toml (TOML 字符串)
@@ -24,6 +26,8 @@ export function useCodexConfigState({ initialData }: UseCodexConfigStateProps) {
   const [codexBaseUrl, setCodexBaseUrl] = useState("");
   const [codexModelName, setCodexModelName] = useState("");
   const [codexAuthError, setCodexAuthError] = useState("");
+  const [codexAuthMode, setCodexAuthModeState] =
+    useState<CodexAuthMode>("manual");
 
   const isUpdatingCodexBaseUrlRef = useRef(false);
   const isUpdatingCodexModelNameRef = useRef(false);
@@ -100,13 +104,51 @@ export function useCodexConfigState({ initialData }: UseCodexConfigStateProps) {
     }
   }, []);
 
+  const detectCodexAuthMode = useCallback((authString: string): CodexAuthMode => {
+    try {
+      const auth = JSON.parse(authString || "{}");
+      if (auth?.auth_mode === "chatgpt") {
+        return "oauth";
+      }
+      if (
+        auth?.auth_mode === "apikey" ||
+        typeof auth?.OPENAI_API_KEY === "string"
+      ) {
+        return "manual";
+      }
+      const hasOAuthToken =
+        typeof auth?.access_token === "string" ||
+        typeof auth?.refresh_token === "string" ||
+        typeof auth?.tokens?.access_token === "string";
+      return hasOAuthToken ? "oauth" : "manual";
+    } catch {
+      return "manual";
+    }
+  }, []);
+
+  const hasCodexOAuthToken = useCallback((authString: string): boolean => {
+    try {
+      const auth = JSON.parse(authString || "{}");
+      return (
+        typeof auth?.access_token === "string" ||
+        typeof auth?.tokens?.access_token === "string"
+      );
+    } catch {
+      return false;
+    }
+  }, []);
+
   // 从 codexAuth 中提取并同步 API Key
   useEffect(() => {
     const extractedKey = getCodexAuthApiKey(codexAuth);
     if (extractedKey !== codexApiKey) {
       setCodexApiKey(extractedKey);
     }
-  }, [codexAuth, codexApiKey]);
+    const nextMode = detectCodexAuthMode(codexAuth);
+    if (nextMode !== codexAuthMode) {
+      setCodexAuthModeState(nextMode);
+    }
+  }, [codexAuth, codexApiKey, codexAuthMode, detectCodexAuthMode]);
 
   // 验证 Codex Auth JSON
   const validateCodexAuth = useCallback((value: string): string => {
@@ -150,6 +192,7 @@ export function useCodexConfigState({ initialData }: UseCodexConfigStateProps) {
       setCodexApiKey(trimmed);
       try {
         const auth = JSON.parse(codexAuth || "{}");
+        auth.auth_mode = "apikey";
         auth.OPENAI_API_KEY = trimmed;
         setCodexAuth(JSON.stringify(auth, null, 2));
       } catch {
@@ -250,8 +293,38 @@ export function useCodexConfigState({ initialData }: UseCodexConfigStateProps) {
       } catch {
         setCodexApiKey("");
       }
+      setCodexAuthModeState(detectCodexAuthMode(authString));
     },
-    [setCodexAuth, setCodexConfig],
+    [setCodexAuth, setCodexConfig, detectCodexAuthMode],
+  );
+
+  const setCodexAuthMode = useCallback(
+    (mode: CodexAuthMode) => {
+      setCodexAuthModeState(mode);
+      try {
+        const auth = JSON.parse(codexAuth || "{}");
+        auth.auth_mode = mode === "oauth" ? "chatgpt" : "apikey";
+        if (mode === "manual" && typeof auth.OPENAI_API_KEY !== "string") {
+          auth.OPENAI_API_KEY = "";
+        }
+        setCodexAuth(JSON.stringify(auth, null, 2));
+      } catch {
+        // ignore
+      }
+    },
+    [codexAuth, setCodexAuth],
+  );
+
+  const setCodexOAuthAuth = useCallback(
+    (authPayload: Record<string, unknown>) => {
+      const merged: Record<string, unknown> = {
+        ...authPayload,
+        auth_mode: "chatgpt",
+      };
+      setCodexAuth(JSON.stringify(merged, null, 2));
+      setCodexAuthModeState("oauth");
+    },
+    [setCodexAuth],
   );
 
   return {
@@ -261,7 +334,10 @@ export function useCodexConfigState({ initialData }: UseCodexConfigStateProps) {
     codexBaseUrl,
     codexModelName,
     codexAuthError,
+    codexAuthMode,
     setCodexAuth,
+    setCodexAuthMode,
+    setCodexOAuthAuth,
     setCodexConfig,
     handleCodexApiKeyChange,
     handleCodexBaseUrlChange,
@@ -270,5 +346,6 @@ export function useCodexConfigState({ initialData }: UseCodexConfigStateProps) {
     resetCodexConfig,
     getCodexAuthApiKey,
     validateCodexAuth,
+    hasCodexOAuthToken,
   };
 }

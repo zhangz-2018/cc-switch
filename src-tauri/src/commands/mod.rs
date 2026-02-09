@@ -1,6 +1,7 @@
 #![allow(non_snake_case)]
 
 mod config;
+mod codex_auth;
 mod deeplink;
 mod env;
 mod failover;
@@ -19,6 +20,7 @@ mod stream_check;
 mod usage;
 
 pub use config::*;
+pub use codex_auth::*;
 pub use deeplink::*;
 pub use env::*;
 pub use failover::*;

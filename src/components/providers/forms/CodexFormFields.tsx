@@ -35,6 +35,15 @@ interface CodexFormFieldsProps {
 
   // Speed Test Endpoints
   speedTestEndpoints: EndpointCandidate[];
+
+  // OpenAI Official 双认证模式
+  isOfficial?: boolean;
+  authMode: "oauth" | "manual";
+  onAuthModeChange: (mode: "oauth" | "manual") => void;
+  onOauthLogin?: () => Promise<void> | void;
+  oauthLoading?: boolean;
+  oauthStatus?: string;
+  hasOauthToken?: boolean;
 }
 
 export function CodexFormFields({
@@ -58,31 +67,130 @@ export function CodexFormFields({
   modelName = "",
   onModelNameChange,
   speedTestEndpoints,
+  isOfficial = false,
+  authMode,
+  onAuthModeChange,
+  onOauthLogin,
+  oauthLoading = false,
+  oauthStatus = "",
+  hasOauthToken = false,
 }: CodexFormFieldsProps) {
   const { t } = useTranslation();
 
   return (
     <>
-      {/* Codex API Key 输入框 */}
-      <ApiKeySection
-        id="codexApiKey"
-        label="API Key"
-        value={codexApiKey}
-        onChange={onApiKeyChange}
-        category={category}
-        shouldShowLink={shouldShowApiKeyLink}
-        websiteUrl={websiteUrl}
-        isPartner={isPartner}
-        partnerPromotionKey={partnerPromotionKey}
-        placeholder={{
-          official: t("providerForm.codexOfficialNoApiKey", {
-            defaultValue: "官方供应商无需 API Key",
-          }),
-          thirdParty: t("providerForm.codexApiKeyAutoFill", {
-            defaultValue: "输入 API Key，将自动填充到配置",
-          }),
-        }}
-      />
+      {/* OpenAI Official：OAuth / 手动 Token 双认证 */}
+      {isOfficial ? (
+        <div className="space-y-3">
+          <div className="space-y-2">
+            <label className="block text-sm font-medium text-foreground">
+              {t("providerForm.codexAuthModeTitle", {
+                defaultValue: "认证方式",
+              })}
+            </label>
+            <div className="grid grid-cols-2 rounded-lg border border-border-default bg-muted/30 p-1">
+              <button
+                type="button"
+                onClick={() => onAuthModeChange("oauth")}
+                className={`rounded-md px-3 py-2 text-sm transition-colors ${
+                  authMode === "oauth"
+                    ? "bg-primary text-primary-foreground"
+                    : "text-muted-foreground hover:text-foreground"
+                }`}
+              >
+                Log in with ChatGPT
+              </button>
+              <button
+                type="button"
+                onClick={() => onAuthModeChange("manual")}
+                className={`rounded-md px-3 py-2 text-sm transition-colors ${
+                  authMode === "manual"
+                    ? "bg-primary text-primary-foreground"
+                    : "text-muted-foreground hover:text-foreground"
+                }`}
+              >
+                {t("providerForm.codexManualToken", {
+                  defaultValue: "手动输入 API Key",
+                })}
+              </button>
+            </div>
+          </div>
+
+          {authMode === "oauth" ? (
+            <div className="rounded-xl border border-border-default bg-muted/20 p-4 space-y-3">
+              <button
+                type="button"
+                onClick={() => onOauthLogin?.()}
+                disabled={oauthLoading}
+                className="w-full px-4 py-2.5 rounded-lg bg-blue-600 text-white text-sm font-medium hover:bg-blue-700 disabled:opacity-60 disabled:cursor-not-allowed transition-colors"
+              >
+                {oauthLoading
+                  ? t("providerForm.codexOauthLoggingIn", {
+                      defaultValue: "登录中...",
+                    })
+                  : "Log in with ChatGPT"}
+              </button>
+              <p className="text-xs text-muted-foreground">
+                {hasOauthToken
+                  ? t("providerForm.codexOauthReady", {
+                      defaultValue: "已获取 OAuth Token，可直接保存",
+                    })
+                  : t("providerForm.codexOauthHint", {
+                      defaultValue:
+                        "点击按钮跳转浏览器登录，完成后会自动回填 Token",
+                    })}
+              </p>
+              {oauthStatus ? (
+                <p className="text-xs text-blue-600 dark:text-blue-400">
+                  {oauthStatus}
+                </p>
+              ) : null}
+            </div>
+          ) : (
+            <ApiKeySection
+              id="codexApiKey"
+              label="API Key"
+              value={codexApiKey}
+              onChange={onApiKeyChange}
+              category={category}
+              shouldShowLink={shouldShowApiKeyLink}
+              websiteUrl={websiteUrl}
+              disabled={false}
+              isPartner={isPartner}
+              partnerPromotionKey={partnerPromotionKey}
+              placeholder={{
+                official: t("providerForm.codexOfficialManualHint", {
+                  defaultValue: "请输入手动 Token",
+                }),
+                thirdParty: t("providerForm.codexApiKeyAutoFill", {
+                  defaultValue: "输入 API Key，将自动填充到配置",
+                }),
+              }}
+            />
+          )}
+        </div>
+      ) : (
+        /* 非官方供应商沿用原有 API Key 方式 */
+        <ApiKeySection
+          id="codexApiKey"
+          label="API Key"
+          value={codexApiKey}
+          onChange={onApiKeyChange}
+          category={category}
+          shouldShowLink={shouldShowApiKeyLink}
+          websiteUrl={websiteUrl}
+          isPartner={isPartner}
+          partnerPromotionKey={partnerPromotionKey}
+          placeholder={{
+            official: t("providerForm.codexOfficialNoApiKey", {
+              defaultValue: "官方供应商无需 API Key",
+            }),
+            thirdParty: t("providerForm.codexApiKeyAutoFill", {
+              defaultValue: "输入 API Key，将自动填充到配置",
+            }),
+          }}
+        />
+      )}
 
       {/* Codex Base URL 输入框 */}
       {shouldShowSpeedTest && (

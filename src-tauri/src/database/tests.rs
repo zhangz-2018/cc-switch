@@ -328,6 +328,47 @@ fn schema_migration_v4_adds_pricing_model_columns() {
 }
 
 #[test]
+fn schema_migration_v5_adds_codex_accounts_table() {
+    let conn = Connection::open_in_memory().expect("open memory db");
+
+    // 先按当前结构建表，再模拟 v5 数据库（无 codex_accounts）
+    Database::create_tables_on_conn(&conn).expect("create tables");
+    conn.execute("DROP TABLE IF EXISTS codex_accounts", [])
+        .expect("drop codex_accounts");
+
+    Database::set_user_version(&conn, 5).expect("set user_version=5");
+    Database::apply_schema_migrations_on_conn(&conn).expect("apply migrations");
+
+    assert!(
+        Database::table_exists(&conn, "codex_accounts").expect("check codex_accounts table"),
+        "codex_accounts should exist after v5 -> v6 migration"
+    );
+
+    for column in [
+        "id",
+        "name",
+        "email",
+        "access_token",
+        "refresh_token",
+        "expires_at",
+        "plan",
+        "created_at",
+        "updated_at",
+        "is_current",
+    ] {
+        assert!(
+            Database::has_column(&conn, "codex_accounts", column).expect("check column"),
+            "codex_accounts.{column} should exist after migration"
+        );
+    }
+
+    assert_eq!(
+        Database::get_user_version(&conn).expect("version after migration"),
+        SCHEMA_VERSION
+    );
+}
+
+#[test]
 fn schema_create_tables_repairs_legacy_proxy_config_singleton_to_per_app() {
     let conn = Connection::open_in_memory().expect("open memory db");
 

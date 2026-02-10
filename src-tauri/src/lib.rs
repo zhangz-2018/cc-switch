@@ -942,6 +942,8 @@ pub fn run() {
             commands::get_session_messages,
             commands::launch_session_terminal,
             commands::get_tool_versions,
+            commands::restart_codex_cli,
+            commands::restart_codex_app,
             // Provider terminal
             commands::open_provider_terminal,
             // Universal Provider management

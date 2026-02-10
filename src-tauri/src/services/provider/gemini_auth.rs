@@ -14,6 +14,8 @@ pub(crate) enum GeminiAuthType {
     Packycode,
     /// Google Official (uses OAuth)
     GoogleOfficial,
+    /// Antigravity provider (uses API Key)
+    Antigravity,
     /// Generic Gemini provider (uses API Key)
     Generic,
 }
@@ -21,9 +23,11 @@ pub(crate) enum GeminiAuthType {
 // Partner Promotion Key constants
 const PACKYCODE_PARTNER_KEY: &str = "packycode";
 const GOOGLE_OFFICIAL_PARTNER_KEY: &str = "google-official";
+const ANTIGRAVITY_PARTNER_KEY: &str = "antigravity";
 
 // PackyCode keyword constants
 const PACKYCODE_KEYWORDS: [&str; 3] = ["packycode", "packyapi", "packy"];
+const ANTIGRAVITY_KEYWORDS: [&str; 1] = ["antigravity"];
 
 /// Detect Gemini provider authentication type
 ///
@@ -32,6 +36,7 @@ const PACKYCODE_KEYWORDS: [&str; 3] = ["packycode", "packyapi", "packy"];
 /// # Returns
 ///
 /// - `GeminiAuthType::GoogleOfficial`: Google official, uses OAuth
+/// - `GeminiAuthType::Antigravity`: Antigravity provider, uses API Key
 /// - `GeminiAuthType::Packycode`: PackyCode provider, uses API Key
 /// - `GeminiAuthType::Generic`: Other generic providers, uses API Key
 pub(crate) fn detect_gemini_auth_type(provider: &Provider) -> GeminiAuthType {
@@ -44,6 +49,9 @@ pub(crate) fn detect_gemini_auth_type(provider: &Provider) -> GeminiAuthType {
         if key.eq_ignore_ascii_case(GOOGLE_OFFICIAL_PARTNER_KEY) {
             return GeminiAuthType::GoogleOfficial;
         }
+        if key.eq_ignore_ascii_case(ANTIGRAVITY_PARTNER_KEY) {
+            return GeminiAuthType::Antigravity;
+        }
         if key.eq_ignore_ascii_case(PACKYCODE_PARTNER_KEY) {
             return GeminiAuthType::Packycode;
         }
@@ -55,12 +63,20 @@ pub(crate) fn detect_gemini_auth_type(provider: &Provider) -> GeminiAuthType {
         return GeminiAuthType::GoogleOfficial;
     }
 
+    // Priority 3: Check Antigravity keywords
+    if contains_antigravity_keyword(&provider.name) {
+        return GeminiAuthType::Antigravity;
+    }
+
     // Priority 3: Check PackyCode keywords
     if contains_packycode_keyword(&provider.name) {
         return GeminiAuthType::Packycode;
     }
 
     if let Some(site) = provider.website_url.as_deref() {
+        if contains_antigravity_keyword(site) {
+            return GeminiAuthType::Antigravity;
+        }
         if contains_packycode_keyword(site) {
             return GeminiAuthType::Packycode;
         }
@@ -71,6 +87,9 @@ pub(crate) fn detect_gemini_auth_type(provider: &Provider) -> GeminiAuthType {
         .pointer("/env/GOOGLE_GEMINI_BASE_URL")
         .and_then(|v| v.as_str())
     {
+        if contains_antigravity_keyword(base_url) {
+            return GeminiAuthType::Antigravity;
+        }
         if contains_packycode_keyword(base_url) {
             return GeminiAuthType::Packycode;
         }
@@ -85,6 +104,14 @@ pub(crate) fn detect_gemini_auth_type(provider: &Provider) -> GeminiAuthType {
 fn contains_packycode_keyword(value: &str) -> bool {
     let lower = value.to_ascii_lowercase();
     PACKYCODE_KEYWORDS
+        .iter()
+        .any(|keyword| lower.contains(keyword))
+}
+
+/// Check if string contains Antigravity keyword (case-insensitive)
+fn contains_antigravity_keyword(value: &str) -> bool {
+    let lower = value.to_ascii_lowercase();
+    ANTIGRAVITY_KEYWORDS
         .iter()
         .any(|keyword| lower.contains(keyword))
 }

@@ -7,6 +7,7 @@ use crate::config::{
 };
 use crate::error::AppError;
 use serde_json::Value;
+use serde_json::json;
 use std::fs;
 use std::path::Path;
 
@@ -92,8 +93,9 @@ pub fn write_codex_live_atomic(
         toml::from_str::<toml::Table>(&cfg_text).map_err(|e| AppError::toml(&config_path, e))?;
     }
 
-    // 第一步：写 auth.json
-    write_json_file(&auth_path, auth)?;
+    // 第一步：写 auth.json（归一化字段，避免遗漏 access_token 等关键字段）
+    let normalized_auth = normalize_codex_auth(auth);
+    write_json_file(&auth_path, &normalized_auth)?;
 
     // 第二步：写 config.toml（失败则回滚 auth.json）
     if let Err(e) = write_text_file(&config_path, &cfg_text) {
@@ -107,6 +109,59 @@ pub fn write_codex_live_atomic(
     }
 
     Ok(())
+}
+
+/// 归一化 Codex auth.json：确保顶层 access_token/refresh_token/id_token/account_id 存在
+pub fn normalize_codex_auth(auth: &Value) -> Value {
+    let mut obj = match auth.as_object() {
+        Some(map) => map.clone(),
+        None => return auth.clone(),
+    };
+
+    let tokens = obj
+        .get("tokens")
+        .and_then(Value::as_object)
+        .cloned();
+
+    if let Some(tokens) = tokens.as_ref() {
+        if obj.get("access_token").is_none() {
+            if let Some(v) = tokens.get("access_token") {
+                obj.insert("access_token".to_string(), v.clone());
+            }
+        }
+        if obj.get("refresh_token").is_none() {
+            if let Some(v) = tokens.get("refresh_token") {
+                obj.insert("refresh_token".to_string(), v.clone());
+            }
+        }
+        if obj.get("id_token").is_none() {
+            if let Some(v) = tokens.get("id_token") {
+                obj.insert("id_token".to_string(), v.clone());
+            }
+        }
+        if obj.get("chatgpt_account_id").is_none() {
+            if let Some(v) = tokens.get("account_id") {
+                obj.insert("chatgpt_account_id".to_string(), v.clone());
+            }
+        }
+    }
+
+    if obj.get("auth_mode").is_none() {
+        if obj
+            .get("OPENAI_API_KEY")
+            .and_then(Value::as_str)
+            .is_some()
+        {
+            obj.insert("auth_mode".to_string(), json!("apikey"));
+        } else if obj.get("access_token").is_some()
+            || tokens.is_some()
+            || obj.get("id_token").is_some()
+        {
+            obj.insert("auth_mode".to_string(), json!("chatgpt"));
+        }
+    }
+
+    Value::Object(obj)
 }
 
 /// 读取 `~/.codex/config.toml`，若不存在返回空字符串

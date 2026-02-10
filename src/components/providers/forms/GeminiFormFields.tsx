@@ -36,6 +36,9 @@ interface GeminiFormFieldsProps {
   shouldShowModelField: boolean;
   model: string;
   onModelChange: (value: string) => void;
+  shouldShowModelsField: boolean;
+  models: string;
+  onModelsChange: (value: string) => void;
 
   // Speed Test Endpoints
   speedTestEndpoints: EndpointCandidate[];
@@ -62,6 +65,9 @@ export function GeminiFormFields({
   shouldShowModelField,
   model,
   onModelChange,
+  shouldShowModelsField,
+  models,
+  onModelsChange,
   speedTestEndpoints,
 }: GeminiFormFieldsProps) {
   const { t } = useTranslation();
@@ -133,6 +139,28 @@ export function GeminiFormFields({
             onChange={(e) => onModelChange(e.target.value)}
             placeholder="gemini-3-pro-preview"
           />
+        </div>
+      )}
+
+      {/* 多模型输入框（逗号分隔） */}
+      {shouldShowModelsField && (
+        <div>
+          <FormLabel htmlFor="gemini-models">
+            {t("provider.form.gemini.models", {
+              defaultValue: "多模型（逗号分隔）",
+            })}
+          </FormLabel>
+          <Input
+            id="gemini-models"
+            value={models}
+            onChange={(e) => onModelsChange(e.target.value)}
+            placeholder="gemini-2.5-pro,gemini-2.5-flash"
+          />
+          <p className="mt-1 text-xs text-muted-foreground">
+            {t("provider.form.gemini.modelsHint", {
+              defaultValue: "用于支持多个模型自动切换，留空则使用单模型字段",
+            })}
+          </p>
         </div>
       )}
 

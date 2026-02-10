@@ -85,10 +85,12 @@ pub(crate) async fn execute_and_format_usage_result(
 fn extract_api_key_from_provider(provider: &crate::provider::Provider) -> Option<String> {
     if let Some(env) = provider.settings_config.get("env") {
         // Try multiple possible API key fields
-        env.get("ANTHROPIC_AUTH_TOKEN")
+        env.get("GEMINI_API_KEY")
+            .or_else(|| env.get("GOOGLE_API_KEY"))
+            .or_else(|| env.get("ANTHROPIC_AUTH_TOKEN"))
             .or_else(|| env.get("ANTHROPIC_API_KEY"))
             .or_else(|| env.get("OPENROUTER_API_KEY"))
-            .or_else(|| env.get("GOOGLE_API_KEY"))
+            .or_else(|| env.get("API_KEY"))
             .and_then(|v| v.as_str())
             .map(|s| s.to_string())
     } else {
@@ -102,6 +104,8 @@ fn extract_base_url_from_provider(provider: &crate::provider::Provider) -> Optio
         // Try multiple possible base URL fields
         env.get("ANTHROPIC_BASE_URL")
             .or_else(|| env.get("GOOGLE_GEMINI_BASE_URL"))
+            .or_else(|| env.get("GEMINI_BASE_URL"))
+            .or_else(|| env.get("BASE_URL"))
             .and_then(|v| v.as_str())
             .map(|s| s.trim_end_matches('/').to_string())
     } else {

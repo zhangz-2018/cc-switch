@@ -330,7 +330,7 @@ export function ProviderCard({
               </button>
             )}
 
-            {isCodexOfficial && isActiveProvider && (
+            {isCodexOfficial && (
               <div className="flex items-center gap-3 text-xs text-muted-foreground">
                 {codexQuotaLoading ? (
                   <span>

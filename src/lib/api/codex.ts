@@ -44,4 +44,12 @@ export const codexApi = {
   getQuota: async (providerId: string): Promise<CodexQuotaResponse> => {
     return invoke("codex_get_quota", { providerId });
   },
+
+  restartCli: async (): Promise<boolean> => {
+    return invoke("restart_codex_cli");
+  },
+
+  restartApp: async (): Promise<boolean> => {
+    return invoke("restart_codex_app");
+  },
 };

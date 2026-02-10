@@ -18,6 +18,7 @@ export function useGeminiConfigState({
   const [geminiApiKey, setGeminiApiKey] = useState("");
   const [geminiBaseUrl, setGeminiBaseUrl] = useState("");
   const [geminiModel, setGeminiModel] = useState("");
+  const [geminiModels, setGeminiModels] = useState("");
   const [envError, setEnvError] = useState("");
   const [configError, setConfigError] = useState("");
 
@@ -29,6 +30,7 @@ export function useGeminiConfigState({
         "GOOGLE_GEMINI_BASE_URL",
         "GEMINI_API_KEY",
         "GEMINI_MODEL",
+        "GEMINI_MODELS",
       ];
       const lines: string[] = [];
       const addedKeys = new Set<string>();
@@ -97,6 +99,9 @@ export function useGeminiConfigState({
       if (typeof env.GEMINI_MODEL === "string") {
         setGeminiModel(env.GEMINI_MODEL);
       }
+      if (typeof env.GEMINI_MODELS === "string") {
+        setGeminiModels(env.GEMINI_MODELS);
+      }
     }
   }, [initialData, envObjToString]);
 
@@ -106,6 +111,7 @@ export function useGeminiConfigState({
     const extractedKey = envObj.GEMINI_API_KEY || "";
     const extractedBaseUrl = envObj.GOOGLE_GEMINI_BASE_URL || "";
     const extractedModel = envObj.GEMINI_MODEL || "";
+    const extractedModels = envObj.GEMINI_MODELS || "";
 
     if (extractedKey !== geminiApiKey) {
       setGeminiApiKey(extractedKey);
@@ -116,7 +122,17 @@ export function useGeminiConfigState({
     if (extractedModel !== geminiModel) {
       setGeminiModel(extractedModel);
     }
-  }, [geminiEnv, envStringToObj, geminiApiKey, geminiBaseUrl, geminiModel]);
+    if (extractedModels !== geminiModels) {
+      setGeminiModels(extractedModels);
+    }
+  }, [
+    geminiEnv,
+    envStringToObj,
+    geminiApiKey,
+    geminiBaseUrl,
+    geminiModel,
+    geminiModels,
+  ]);
 
   // 验证 Gemini Config JSON
   const validateGeminiConfig = useCallback((value: string): string => {
@@ -192,6 +208,20 @@ export function useGeminiConfigState({
     [geminiEnv, envStringToObj, envObjToString, setGeminiEnv],
   );
 
+  // 处理 Gemini Models 变化（逗号分隔）
+  const handleGeminiModelsChange = useCallback(
+    (models: string) => {
+      const trimmed = models.trim();
+      setGeminiModels(trimmed);
+
+      const envObj = envStringToObj(geminiEnv);
+      envObj.GEMINI_MODELS = trimmed;
+      const newEnv = envObjToString(envObj);
+      setGeminiEnv(newEnv);
+    },
+    [geminiEnv, envStringToObj, envObjToString, setGeminiEnv],
+  );
+
   // 处理 env 变化
   const handleGeminiEnvChange = useCallback(
     (value: string) => {
@@ -235,6 +265,12 @@ export function useGeminiConfigState({
       } else {
         setGeminiModel("");
       }
+
+      if (typeof env.GEMINI_MODELS === "string") {
+        setGeminiModels(env.GEMINI_MODELS);
+      } else {
+        setGeminiModels("");
+      }
     },
     [envObjToString, setGeminiEnv, setGeminiConfig],
   );
@@ -245,6 +281,7 @@ export function useGeminiConfigState({
     geminiApiKey,
     geminiBaseUrl,
     geminiModel,
+    geminiModels,
     envError,
     configError,
     setGeminiEnv,
@@ -252,6 +289,7 @@ export function useGeminiConfigState({
     handleGeminiApiKeyChange,
     handleGeminiBaseUrlChange,
     handleGeminiModelChange,
+    handleGeminiModelsChange,
     handleGeminiEnvChange,
     handleGeminiConfigChange,
     resetGeminiConfig,

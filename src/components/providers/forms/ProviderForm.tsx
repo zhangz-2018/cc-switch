@@ -353,19 +353,29 @@ export function ProviderForm({
       const flow = await codexApi.initOAuthDeviceFlow();
       const verificationUrl =
         flow.verificationUriComplete || flow.verificationUri;
+      const userCode = (flow.userCode || "").trim();
 
       await settingsApi.openExternal(verificationUrl);
-      setCodexOauthStatus(
-        t("providerForm.codexOauthWaiting", {
-          defaultValue: `请在浏览器完成授权，验证码：${flow.userCode}`,
-        }),
-      );
-      toast.info(
-        t("providerForm.codexOauthCode", {
-          defaultValue: `请在浏览器输入验证码：${flow.userCode}`,
-        }),
-        { duration: 10000 },
-      );
+      if (userCode) {
+        setCodexOauthStatus(
+          t("providerForm.codexOauthWaiting", {
+            defaultValue: `请在浏览器完成授权，验证码：${userCode}`,
+          }),
+        );
+        toast.info(
+          t("providerForm.codexOauthCode", {
+            defaultValue: `请在浏览器输入验证码：${userCode}`,
+          }),
+          { duration: 10000 },
+        );
+      } else {
+        const fallbackText = t("providerForm.codexOauthWaitingNoCode", {
+          defaultValue:
+            "已打开浏览器登录页面，请完成授权后返回应用，系统将自动获取 Token",
+        });
+        setCodexOauthStatus(fallbackText);
+        toast.info(fallbackText, { duration: 10000 });
+      }
 
       const intervalMs = Math.max(flow.interval, 3) * 1000;
       const deadline = Date.now() + Math.max(flow.expiresIn, 60) * 1000;
@@ -384,8 +394,15 @@ export function ProviderForm({
         }
 
         if (result.status === "success" && result.authJson) {
+          const authString = JSON.stringify(result.authJson);
+          if (!hasCodexOAuthToken(authString)) {
+            throw new Error(
+              t("providerForm.codexOauthNoToken", {
+                defaultValue: "登录返回成功，但未获取到有效 Token，请重试",
+              }),
+            );
+          }
           setCodexOAuthAuth(result.authJson as Record<string, unknown>);
-          setCodexAuthMode("oauth");
           setCodexOauthStatus(
             t("providerForm.codexOauthSuccess", {
               defaultValue: "登录成功，Token 已自动填充",
@@ -414,18 +431,41 @@ export function ProviderForm({
         }),
       );
     } catch (error) {
-      const message =
-        error instanceof Error
-          ? error.message
-          : t("providerForm.codexOauthFailed", {
-              defaultValue: "OAuth 登录失败，请重试",
-            });
+      const fallbackMessage = t("providerForm.codexOauthFailed", {
+        defaultValue: "OAuth 登录失败，请重试",
+      });
+      let message = fallbackMessage;
+      if (error instanceof Error && error.message) {
+        message = error.message;
+      } else if (typeof error === "string" && error.trim()) {
+        message = error;
+      } else if (error && typeof error === "object") {
+        const raw = error as Record<string, unknown>;
+        const candidates = [
+          raw.errorDescription,
+          raw.error_description,
+          raw.message,
+          raw.error,
+        ];
+        const firstText = candidates.find(
+          (v): v is string => typeof v === "string" && v.trim().length > 0,
+        );
+        if (firstText) {
+          message = firstText;
+        } else {
+          try {
+            message = JSON.stringify(raw);
+          } catch {
+            message = fallbackMessage;
+          }
+        }
+      }
       setCodexOauthStatus(message);
       toast.error(message);
     } finally {
       setCodexOauthLoading(false);
     }
-  }, [setCodexOAuthAuth, setCodexAuthMode, t]);
+  }, [hasCodexOAuthToken, setCodexOAuthAuth, setCodexAuthMode, t]);
 
   useEffect(() => {
     form.reset(defaultValues);
@@ -526,11 +566,13 @@ export function ProviderForm({
     geminiApiKey,
     geminiBaseUrl,
     geminiModel,
+    geminiModels,
     envError,
     configError: geminiConfigError,
     handleGeminiApiKeyChange: originalHandleGeminiApiKeyChange,
     handleGeminiBaseUrlChange: originalHandleGeminiBaseUrlChange,
     handleGeminiModelChange: originalHandleGeminiModelChange,
+    handleGeminiModelsChange: originalHandleGeminiModelsChange,
     handleGeminiEnvChange,
     handleGeminiConfigChange,
     resetGeminiConfig,
@@ -587,6 +629,22 @@ export function ProviderForm({
       }
     },
     [originalHandleGeminiModelChange, form],
+  );
+
+  const handleGeminiModelsChange = useCallback(
+    (models: string) => {
+      originalHandleGeminiModelsChange(models);
+      // 同步更新 settingsConfig
+      try {
+        const config = JSON.parse(form.getValues("settingsConfig") || "{}");
+        if (!config.env) config.env = {};
+        config.env.GEMINI_MODELS = models.trim();
+        form.setValue("settingsConfig", JSON.stringify(config, null, 2));
+      } catch {
+        // ignore
+      }
+    },
+    [originalHandleGeminiModelsChange, form],
   );
 
   // 使用 Gemini 通用配置 hook (仅 Gemini 模式)
@@ -1476,6 +1534,9 @@ export function ProviderForm({
             shouldShowModelField={true}
             model={geminiModel}
             onModelChange={handleGeminiModelChange}
+            shouldShowModelsField={true}
+            models={geminiModels}
+            onModelsChange={handleGeminiModelsChange}
             speedTestEndpoints={speedTestEndpoints}
           />
         )}

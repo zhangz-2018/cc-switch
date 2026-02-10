@@ -529,7 +529,11 @@
     "categoryOfficial": "官方",
     "categoryCnOfficial": "开源官方",
     "categoryAggregation": "聚合服务",
-    "categoryThirdParty": "第三方"
+    "categoryThirdParty": "第三方",
+    "codexSwitchRestartHint": "已切换供应商，但 Codex CLI 仍在使用旧 Token。请点击“立即重启 Codex CLI”使配置生效。",
+    "codexRestartCli": "立即重启 Codex CLI",
+    "codexRestartCliSuccess": "Codex CLI 已重启",
+    "codexRestartCliFailed": "重启 Codex CLI 失败"
   },
   "endpointTest": {
     "title": "请求地址管理",

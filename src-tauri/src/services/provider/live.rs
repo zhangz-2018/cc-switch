@@ -7,7 +7,7 @@ use std::collections::HashMap;
 use serde_json::{json, Value};
 
 use crate::app_config::AppType;
-use crate::codex_config::{get_codex_auth_path, get_codex_config_path};
+use crate::codex_config::{get_codex_auth_path, get_codex_config_path, normalize_codex_auth};
 use crate::config::{delete_file, get_claude_settings_path, read_json_file, write_json_file};
 use crate::error::AppError;
 use crate::provider::Provider;
@@ -125,7 +125,7 @@ pub(crate) fn write_live_snapshot(app_type: &AppType, provider: &Provider) -> Re
             })?;
 
             let auth_path = get_codex_auth_path();
-            write_json_file(&auth_path, auth)?;
+            write_json_file(&auth_path, &normalize_codex_auth(auth))?;
             let config_path = get_codex_config_path();
             std::fs::write(&config_path, config_str).map_err(|e| AppError::io(&config_path, e))?;
         }
@@ -509,6 +509,11 @@ pub(crate) fn write_gemini_live(provider: &Provider) -> Result<(), AppError> {
             env_map.clear();
             write_gemini_env_atomic(&env_map)?;
         }
+        GeminiAuthType::Antigravity => {
+            // Antigravity provider, uses API Key (strict validation on switch)
+            validate_gemini_settings_strict(&provider.settings_config)?;
+            write_gemini_env_atomic(&env_map)?;
+        }
         GeminiAuthType::Packycode => {
             // PackyCode provider, uses API Key (strict validation on switch)
             validate_gemini_settings_strict(&provider.settings_config)?;
@@ -530,7 +535,7 @@ pub(crate) fn write_gemini_live(provider: &Provider) -> Result<(), AppError> {
     // - All others: API Key mode
     match auth_type {
         GeminiAuthType::GoogleOfficial => ensure_google_oauth_security_flag(provider)?,
-        GeminiAuthType::Packycode | GeminiAuthType::Generic => {
+        GeminiAuthType::Antigravity | GeminiAuthType::Packycode | GeminiAuthType::Generic => {
             crate::gemini_config::write_packycode_settings()?;
         }
     }

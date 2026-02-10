@@ -15,6 +15,72 @@ interface UseCodexConfigStateProps {
 
 export type CodexAuthMode = "oauth" | "manual";
 
+type JsonRecord = Record<string, unknown>;
+
+const isJsonRecord = (value: unknown): value is JsonRecord =>
+  typeof value === "object" && value !== null && !Array.isArray(value);
+
+const parseAuthObject = (authString: string): JsonRecord | null => {
+  try {
+    const parsed = JSON.parse(authString || "{}");
+    if (!isJsonRecord(parsed)) {
+      return null;
+    }
+    if (isJsonRecord(parsed.auth)) {
+      return parsed.auth;
+    }
+    return parsed;
+  } catch {
+    return null;
+  }
+};
+
+const hasNonEmptyString = (value: unknown): value is string =>
+  typeof value === "string" && value.trim().length > 0;
+
+const hasOAuthTokenInAuth = (auth: JsonRecord): boolean => {
+  const nestedTokens = isJsonRecord(auth.tokens) ? auth.tokens : null;
+  const containers: JsonRecord[] = nestedTokens ? [auth, nestedTokens] : [auth];
+
+  return containers.some((container) =>
+    [
+      "access_token",
+      "refresh_token",
+      "id_token",
+      "accessToken",
+      "refreshToken",
+      "idToken",
+    ].some((key) => hasNonEmptyString(container[key])),
+  );
+};
+
+const normalizeOAuthAuthPayload = (payload: unknown): JsonRecord => {
+  let parsed: unknown = payload;
+
+  if (typeof parsed === "string") {
+    try {
+      parsed = JSON.parse(parsed);
+    } catch {
+      parsed = {};
+    }
+  }
+
+  if (isJsonRecord(parsed) && isJsonRecord(parsed.auth)) {
+    parsed = parsed.auth;
+  }
+
+  if (!isJsonRecord(parsed)) {
+    parsed = {};
+  }
+
+  const authObject: JsonRecord = isJsonRecord(parsed) ? parsed : {};
+
+  return {
+    ...authObject,
+    auth_mode: "chatgpt",
+  };
+};
+
 /**
  * 管理 Codex 配置状态
  * Codex 配置包含两部分：auth.json (JSON) 和 config.toml (TOML 字符串)
@@ -96,46 +162,36 @@ export function useCodexConfigState({ initialData }: UseCodexConfigStateProps) {
 
   // 获取 API Key（从 auth JSON）
   const getCodexAuthApiKey = useCallback((authString: string): string => {
-    try {
-      const auth = JSON.parse(authString || "{}");
-      return typeof auth.OPENAI_API_KEY === "string" ? auth.OPENAI_API_KEY : "";
-    } catch {
-      return "";
-    }
+    const auth = parseAuthObject(authString);
+    if (!auth) return "";
+    return hasNonEmptyString(auth.OPENAI_API_KEY) ? auth.OPENAI_API_KEY : "";
   }, []);
 
   const detectCodexAuthMode = useCallback((authString: string): CodexAuthMode => {
-    try {
-      const auth = JSON.parse(authString || "{}");
-      if (auth?.auth_mode === "chatgpt") {
-        return "oauth";
-      }
-      if (
-        auth?.auth_mode === "apikey" ||
-        typeof auth?.OPENAI_API_KEY === "string"
-      ) {
-        return "manual";
-      }
-      const hasOAuthToken =
-        typeof auth?.access_token === "string" ||
-        typeof auth?.refresh_token === "string" ||
-        typeof auth?.tokens?.access_token === "string";
-      return hasOAuthToken ? "oauth" : "manual";
-    } catch {
+    const auth = parseAuthObject(authString);
+    if (!auth) {
       return "manual";
     }
+
+    if (auth.auth_mode === "chatgpt") {
+      return "oauth";
+    }
+    if (auth.auth_mode === "apikey") {
+      return "manual";
+    }
+    if (hasOAuthTokenInAuth(auth)) {
+      return "oauth";
+    }
+    if (typeof auth.OPENAI_API_KEY === "string") {
+      return "manual";
+    }
+    return "manual";
   }, []);
 
   const hasCodexOAuthToken = useCallback((authString: string): boolean => {
-    try {
-      const auth = JSON.parse(authString || "{}");
-      return (
-        typeof auth?.access_token === "string" ||
-        typeof auth?.tokens?.access_token === "string"
-      );
-    } catch {
-      return false;
-    }
+    const auth = parseAuthObject(authString);
+    if (!auth) return false;
+    return hasOAuthTokenInAuth(auth);
   }, []);
 
   // 从 codexAuth 中提取并同步 API Key
@@ -302,7 +358,7 @@ export function useCodexConfigState({ initialData }: UseCodexConfigStateProps) {
     (mode: CodexAuthMode) => {
       setCodexAuthModeState(mode);
       try {
-        const auth = JSON.parse(codexAuth || "{}");
+        const auth = parseAuthObject(codexAuth) ?? {};
         auth.auth_mode = mode === "oauth" ? "chatgpt" : "apikey";
         if (mode === "manual" && typeof auth.OPENAI_API_KEY !== "string") {
           auth.OPENAI_API_KEY = "";
@@ -317,10 +373,7 @@ export function useCodexConfigState({ initialData }: UseCodexConfigStateProps) {
 
   const setCodexOAuthAuth = useCallback(
     (authPayload: Record<string, unknown>) => {
-      const merged: Record<string, unknown> = {
-        ...authPayload,
-        auth_mode: "chatgpt",
-      };
+      const merged = normalizeOAuthAuthPayload(authPayload);
       setCodexAuth(JSON.stringify(merged, null, 2));
       setCodexAuthModeState("oauth");
     },

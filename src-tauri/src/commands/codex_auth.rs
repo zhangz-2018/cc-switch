@@ -1,10 +1,8 @@
 use std::collections::HashMap;
-use std::fs;
-use std::fs::File;
-use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::io::{ErrorKind, Read, Write};
+use std::net::{TcpListener, TcpStream};
 use std::sync::Mutex;
-use std::time::{Duration, UNIX_EPOCH};
+use std::time::Duration;
 
 use base64::engine::general_purpose::{URL_SAFE, URL_SAFE_NO_PAD};
 use base64::Engine;
@@ -14,7 +12,9 @@ use regex::Regex;
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
+use sha2::{Digest, Sha256};
 use tauri::State;
+use url::Url;
 use uuid::Uuid;
 
 use crate::app_config::AppType;
@@ -22,21 +22,18 @@ use crate::error::AppError;
 use crate::provider::Provider;
 use crate::store::AppState;
 
-const CODEX_DEVICE_AUTH_URL: &str = "https://auth.openai.com/codex/device";
-const CODEX_OAUTH_DEFAULT_EXPIRES_IN: i64 = 900;
-const CODEX_OAUTH_DEFAULT_INTERVAL: i64 = 5;
-const CODEX_OAUTH_SESSION_TTL_SECONDS: i64 = 20 * 60;
-const CODEX_OAUTH_PARSE_MAX_WAIT_MS: u64 = 4000;
-const CODEX_OAUTH_PARSE_STEP_MS: u64 = 120;
+const CODEX_OAUTH_CLIENT_ID: &str = "app_EMoamEEZ73f0CkXaXp7hrann";
+const CODEX_OAUTH_AUTHORIZE_ENDPOINT: &str = "https://auth.openai.com/oauth/authorize";
+const CODEX_OAUTH_TOKEN_ENDPOINT: &str = "https://auth.openai.com/oauth/token";
+const CODEX_OAUTH_SCOPE: &str = "openid profile email offline_access";
+const CODEX_OAUTH_ORIGINATOR: &str = "codex_vscode";
+const CODEX_OAUTH_CALLBACK_PORT: u16 = 1455;
+const CODEX_OAUTH_PORT_IN_USE_CODE: &str = "CODEX_OAUTH_PORT_IN_USE";
+const CODEX_OAUTH_DEFAULT_EXPIRES_IN: i64 = 5 * 60;
+const CODEX_OAUTH_DEFAULT_INTERVAL: i64 = 2;
+const CODEX_OAUTH_SESSION_TTL_SECONDS: i64 = 5 * 60;
 
-static ANSI_ESCAPE_RE: Lazy<Regex> =
-    Lazy::new(|| Regex::new(r"\x1b\[[0-9;]*m").expect("valid ansi regex"));
-static DEVICE_CODE_RE: Lazy<Regex> =
-    Lazy::new(|| Regex::new(r"\b([A-Z0-9]{4}-[A-Z0-9]{4})\b").expect("valid device code regex"));
-static VERIFICATION_URL_RE: Lazy<Regex> = Lazy::new(|| {
-    Regex::new(r"https://auth\.openai\.com/\S+").expect("valid verification url regex")
-});
-static CODEX_OAUTH_SESSIONS: Lazy<Mutex<HashMap<String, CodexCliOauthSession>>> =
+static CODEX_OAUTH_SESSIONS: Lazy<Mutex<HashMap<String, CodexPkceOauthSession>>> =
     Lazy::new(|| Mutex::new(HashMap::new()));
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -86,38 +83,33 @@ pub struct CodexQuotaUsage {
 }
 
 #[derive(Debug, Clone)]
-enum CodexCliProcessStatus {
-    Running,
-    Exited(i32),
-}
-
-#[derive(Debug, Clone)]
-struct CodexCliOauthSession {
+struct CodexPkceOauthSession {
     started_at: i64,
     expires_at: i64,
-    log_path: PathBuf,
-    verification_uri: Option<String>,
-    user_code: Option<String>,
-    auth_mtime_before: Option<i64>,
-    process_status: CodexCliProcessStatus,
+    state_token: String,
+    code_verifier: String,
+    redirect_uri: String,
+    auth_url: String,
+    auth_code: Option<String>,
 }
 
-#[derive(Debug)]
-struct ParsedCodexAuth {
-    auth_json: Value,
+#[derive(Debug, Deserialize)]
+struct CodexOAuthTokenResponse {
     access_token: String,
+    #[serde(default)]
+    refresh_token: Option<String>,
+    #[serde(default)]
     id_token: Option<String>,
-    file_mtime: Option<i64>,
 }
 
 #[tauri::command]
 pub async fn codex_oauth_init_device_flow() -> Result<CodexOauthDeviceFlowResponse, String> {
-    start_codex_cli_oauth_session()
+    start_browser_oauth_session()
 }
 
 #[tauri::command]
 pub async fn codex_oauth_poll_token(device_code: String) -> Result<CodexOauthPollResponse, String> {
-    match poll_codex_cli_oauth_session(&device_code).await {
+    match poll_browser_oauth_session(&device_code).await {
         Ok(resp) => Ok(resp),
         Err(err) => Ok(CodexOauthPollResponse {
             status: "error".to_string(),
@@ -129,33 +121,33 @@ pub async fn codex_oauth_poll_token(device_code: String) -> Result<CodexOauthPol
     }
 }
 
-fn start_codex_cli_oauth_session() -> Result<CodexOauthDeviceFlowResponse, String> {
-    ensure_codex_cli_available()?;
+fn start_browser_oauth_session() -> Result<CodexOauthDeviceFlowResponse, String> {
     cleanup_expired_oauth_sessions();
+
+    if let Some((session_id, session)) = get_active_oauth_session() {
+        return Ok(CodexOauthDeviceFlowResponse {
+            device_code: session_id,
+            user_code: String::new(),
+            verification_uri: session.auth_url.clone(),
+            verification_uri_complete: Some(session.auth_url),
+            expires_in: (session.expires_at - Utc::now().timestamp()).max(0),
+            interval: CODEX_OAUTH_DEFAULT_INTERVAL,
+        });
+    }
+
+    let listener = bind_oauth_callback_listener()?;
 
     let session_id = Uuid::new_v4().to_string();
     let started_at = Utc::now().timestamp();
     let expires_at = started_at + CODEX_OAUTH_SESSION_TTL_SECONDS;
-    let log_path = get_codex_oauth_log_dir()?.join(format!("codex-login-{session_id}.log"));
-
-    let stdout_file =
-        File::create(&log_path).map_err(|e| format!("创建 OAuth 日志文件失败: {e}"))?;
-    let stderr_file = stdout_file
-        .try_clone()
-        .map_err(|e| format!("准备 OAuth 日志输出失败: {e}"))?;
-
-    let mut child = Command::new("codex")
-        .arg("login")
-        .arg("--device-auth")
-        .env("NO_COLOR", "1")
-        .env("CLICOLOR", "0")
-        .env("TERM", "dumb")
-        .stdout(Stdio::from(stdout_file))
-        .stderr(Stdio::from(stderr_file))
-        .spawn()
-        .map_err(|e| format!("启动 Codex 登录进程失败: {e}"))?;
-
-    let auth_mtime_before = file_mtime_unix(&crate::codex_config::get_codex_auth_path());
+    let code_verifier = generate_base64url_token();
+    let code_challenge = generate_code_challenge(&code_verifier);
+    let state_token = generate_base64url_token();
+    let redirect_uri = format!(
+        "http://localhost:{}/auth/callback",
+        CODEX_OAUTH_CALLBACK_PORT
+    );
+    let auth_url = build_auth_url(&redirect_uri, &code_challenge, &state_token)?;
 
     {
         let mut sessions = CODEX_OAUTH_SESSIONS
@@ -163,101 +155,38 @@ fn start_codex_cli_oauth_session() -> Result<CodexOauthDeviceFlowResponse, Strin
             .map_err(|_| "OAuth 会话状态锁异常，请重试".to_string())?;
         sessions.insert(
             session_id.clone(),
-            CodexCliOauthSession {
+            CodexPkceOauthSession {
                 started_at,
                 expires_at,
-                log_path: log_path.clone(),
-                verification_uri: None,
-                user_code: None,
-                auth_mtime_before,
-                process_status: CodexCliProcessStatus::Running,
+                state_token: state_token.clone(),
+                code_verifier,
+                redirect_uri,
+                auth_url: auth_url.clone(),
+                auth_code: None,
             },
         );
     }
 
-    let session_id_for_wait = session_id.clone();
-    std::thread::spawn(move || {
-        let exit_code = child.wait().ok().and_then(|s| s.code()).unwrap_or(-1);
-        if let Ok(mut sessions) = CODEX_OAUTH_SESSIONS.lock() {
-            if let Some(session) = sessions.get_mut(&session_id_for_wait) {
-                session.process_status = CodexCliProcessStatus::Exited(exit_code);
-            }
-        }
-    });
-
-    let deadline = std::time::Instant::now() + Duration::from_millis(CODEX_OAUTH_PARSE_MAX_WAIT_MS);
-    let mut verification_uri: Option<String> = None;
-    let mut user_code: Option<String> = None;
-
-    while std::time::Instant::now() < deadline {
-        if let Ok(log_text) = fs::read_to_string(&log_path) {
-            let (parsed_uri, parsed_code) = parse_device_flow_from_log(&log_text);
-            if verification_uri.is_none() {
-                verification_uri = parsed_uri;
-            }
-            if user_code.is_none() {
-                user_code = parsed_code;
-            }
-            if verification_uri.is_some() && user_code.is_some() {
-                break;
-            }
-        }
-        std::thread::sleep(Duration::from_millis(CODEX_OAUTH_PARSE_STEP_MS));
-    }
-
-    {
-        let mut sessions = CODEX_OAUTH_SESSIONS
-            .lock()
-            .map_err(|_| "OAuth 会话状态锁异常，请重试".to_string())?;
-        if let Some(session) = sessions.get_mut(&session_id) {
-            if session.verification_uri.is_none() {
-                session.verification_uri = verification_uri.clone();
-            }
-            if session.user_code.is_none() {
-                session.user_code = user_code.clone();
-            }
-        }
-    }
-
-    let process_exit_code = {
-        let sessions = CODEX_OAUTH_SESSIONS
-            .lock()
-            .map_err(|_| "OAuth 会话状态锁异常，请重试".to_string())?;
-        sessions
-            .get(&session_id)
-            .and_then(|s| match s.process_status {
-                CodexCliProcessStatus::Exited(code) => Some(code),
-                CodexCliProcessStatus::Running => None,
-            })
-    };
-
-    if verification_uri.is_none() && user_code.is_none() {
-        if let Some(code) = process_exit_code {
-            let details = read_log_tail(&log_path, 16).unwrap_or_else(|| "未知错误".to_string());
-            return Err(format!("启动 Codex OAuth 失败 (exit {code}): {details}"));
-        }
-    }
+    start_callback_server(listener, session_id.clone(), state_token, expires_at);
 
     Ok(CodexOauthDeviceFlowResponse {
         device_code: session_id,
-        user_code: user_code.unwrap_or_default(),
-        verification_uri: verification_uri
-            .clone()
-            .unwrap_or_else(|| CODEX_DEVICE_AUTH_URL.to_string()),
-        verification_uri_complete: verification_uri,
+        user_code: String::new(),
+        verification_uri: auth_url.clone(),
+        verification_uri_complete: Some(auth_url),
         expires_in: CODEX_OAUTH_DEFAULT_EXPIRES_IN,
         interval: CODEX_OAUTH_DEFAULT_INTERVAL,
     })
 }
 
-async fn poll_codex_cli_oauth_session(session_id: &str) -> Result<CodexOauthPollResponse, String> {
+async fn poll_browser_oauth_session(session_id: &str) -> Result<CodexOauthPollResponse, String> {
     cleanup_expired_oauth_sessions();
 
-    let mut session = {
-        let mut sessions = CODEX_OAUTH_SESSIONS
+    let session = {
+        let sessions = CODEX_OAUTH_SESSIONS
             .lock()
             .map_err(|_| "OAuth 会话状态锁异常，请重试".to_string())?;
-        let Some(session) = sessions.get_mut(session_id) else {
+        let Some(session) = sessions.get(session_id) else {
             return Ok(CodexOauthPollResponse {
                 status: "error".to_string(),
                 auth_json: None,
@@ -266,7 +195,6 @@ async fn poll_codex_cli_oauth_session(session_id: &str) -> Result<CodexOauthPoll
                 error_description: Some("OAuth 会话不存在或已过期，请重新登录".to_string()),
             });
         };
-        refresh_session_device_flow_from_log(session);
         session.clone()
     };
 
@@ -281,232 +209,434 @@ async fn poll_codex_cli_oauth_session(session_id: &str) -> Result<CodexOauthPoll
         });
     }
 
-    if let Some(parsed_auth) = try_parse_codex_auth_file()? {
-        let auth_file_updated = match (parsed_auth.file_mtime, session.auth_mtime_before) {
-            (Some(after), Some(before)) => after > before,
-            (Some(_), None) => true,
-            _ => false,
-        };
-        let can_accept_existing_token =
-            matches!(session.process_status, CodexCliProcessStatus::Exited(0));
-
-        if auth_file_updated || can_accept_existing_token {
-            let mut auth_json = parsed_auth.auth_json;
-            if let Some(auth_obj) = auth_json.as_object_mut() {
-                auth_obj.insert("auth_mode".to_string(), json!("chatgpt"));
-                if auth_obj.get("last_refresh").is_none() {
-                    auth_obj.insert("last_refresh".to_string(), json!(Utc::now().to_rfc3339()));
-                }
-            }
-
-            let email_from_claims = parsed_auth
-                .id_token
-                .as_deref()
-                .and_then(decode_jwt_payload)
-                .as_ref()
-                .and_then(|claims| extract_email_from_claims(Some(claims)));
-
-            let email = if email_from_claims.is_some() {
-                email_from_claims
-            } else {
-                fetch_user_email(&Client::new(), &parsed_auth.access_token)
-                    .await
-                    .ok()
-                    .flatten()
-            };
-
-            remove_oauth_session(session_id);
-            return Ok(CodexOauthPollResponse {
-                status: "success".to_string(),
-                auth_json: Some(auth_json),
-                email,
-                error: None,
-                error_description: None,
-            });
-        }
-    }
-
-    session = {
-        let sessions = CODEX_OAUTH_SESSIONS
-            .lock()
-            .map_err(|_| "OAuth 会话状态锁异常，请重试".to_string())?;
-        let Some(current) = sessions.get(session_id) else {
-            return Ok(CodexOauthPollResponse {
-                status: "error".to_string(),
-                auth_json: None,
-                email: None,
-                error: Some("oauth_session_not_found".to_string()),
-                error_description: Some("OAuth 会话不存在或已过期，请重新登录".to_string()),
-            });
-        };
-        current.clone()
+    let Some(code) = session.auth_code.clone() else {
+        return Ok(CodexOauthPollResponse {
+            status: "pending".to_string(),
+            auth_json: None,
+            email: None,
+            error: Some("authorization_pending".to_string()),
+            error_description: Some("等待浏览器完成授权".to_string()),
+        });
     };
 
-    match session.process_status {
-        CodexCliProcessStatus::Running | CodexCliProcessStatus::Exited(0) => {
-            Ok(CodexOauthPollResponse {
-                status: "pending".to_string(),
-                auth_json: None,
-                email: None,
-                error: Some("authorization_pending".to_string()),
-                error_description: Some("等待浏览器完成授权".to_string()),
-            })
-        }
-        CodexCliProcessStatus::Exited(code) => {
-            remove_oauth_session(session_id);
-            let details = read_log_tail(&session.log_path, 20)
-                .unwrap_or_else(|| "Codex 登录进程异常退出".to_string());
-            Ok(CodexOauthPollResponse {
-                status: "error".to_string(),
-                auth_json: None,
-                email: None,
-                error: Some("oauth_cli_failed".to_string()),
-                error_description: Some(format!("Codex 登录失败 (exit {code}): {details}")),
-            })
-        }
-    }
-}
+    let token_response =
+        match exchange_code_for_token(&code, &session.code_verifier, &session.redirect_uri).await {
+            Ok(tokens) => tokens,
+            Err(err) => {
+                remove_oauth_session(session_id);
+                return Ok(CodexOauthPollResponse {
+                    status: "error".to_string(),
+                    auth_json: None,
+                    email: None,
+                    error: Some("oauth_token_exchange_failed".to_string()),
+                    error_description: Some(err),
+                });
+            }
+        };
 
-fn ensure_codex_cli_available() -> Result<(), String> {
-    let status = Command::new("codex")
-        .arg("--version")
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
-        .map_err(|e| format!("未检测到 codex 命令，请先安装 Codex CLI: {e}"))?;
-
-    if status.success() {
-        Ok(())
+    let auth_json = build_auth_json_from_tokens(&token_response);
+    let id_token_claims = token_response
+        .id_token
+        .as_deref()
+        .and_then(decode_jwt_payload);
+    let email_from_claims = extract_email_from_claims(id_token_claims.as_ref());
+    let email = if email_from_claims.is_some() {
+        email_from_claims
     } else {
-        Err("检测到 codex 命令但无法执行，请检查安装或 PATH 配置".to_string())
-    }
+        fetch_user_email(&Client::new(), &token_response.access_token)
+            .await
+            .ok()
+            .flatten()
+    };
+
+    remove_oauth_session(session_id);
+    Ok(CodexOauthPollResponse {
+        status: "success".to_string(),
+        auth_json: Some(auth_json),
+        email,
+        error: None,
+        error_description: None,
+    })
 }
 
-fn get_codex_oauth_log_dir() -> Result<PathBuf, String> {
-    let log_dir = crate::config::get_app_config_dir().join("oauth-logs");
-    fs::create_dir_all(&log_dir).map_err(|e| format!("创建 OAuth 日志目录失败: {e}"))?;
-    Ok(log_dir)
+fn get_active_oauth_session() -> Option<(String, CodexPkceOauthSession)> {
+    let sessions = CODEX_OAUTH_SESSIONS.lock().ok()?;
+    sessions.iter().find_map(|(id, session)| {
+        if Utc::now().timestamp() <= session.expires_at {
+            Some((id.clone(), session.clone()))
+        } else {
+            None
+        }
+    })
+}
+
+fn generate_base64url_token() -> String {
+    let bytes: [u8; 32] = rand::random();
+    URL_SAFE_NO_PAD.encode(bytes)
+}
+
+fn generate_code_challenge(code_verifier: &str) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(code_verifier.as_bytes());
+    let hash = hasher.finalize();
+    URL_SAFE_NO_PAD.encode(hash)
+}
+
+fn build_auth_url(redirect_uri: &str, code_challenge: &str, state: &str) -> Result<String, String> {
+    let mut url = Url::parse(CODEX_OAUTH_AUTHORIZE_ENDPOINT)
+        .map_err(|e| format!("构建 OAuth 授权链接失败: {e}"))?;
+    {
+        let mut pairs = url.query_pairs_mut();
+        pairs.append_pair("response_type", "code");
+        pairs.append_pair("client_id", CODEX_OAUTH_CLIENT_ID);
+        pairs.append_pair("redirect_uri", redirect_uri);
+        pairs.append_pair("scope", CODEX_OAUTH_SCOPE);
+        pairs.append_pair("code_challenge", code_challenge);
+        pairs.append_pair("code_challenge_method", "S256");
+        pairs.append_pair("id_token_add_organizations", "true");
+        pairs.append_pair("codex_cli_simplified_flow", "true");
+        pairs.append_pair("state", state);
+        pairs.append_pair("originator", CODEX_OAUTH_ORIGINATOR);
+    }
+    Ok(url.to_string())
+}
+
+fn bind_oauth_callback_listener() -> Result<TcpListener, String> {
+    let listener = TcpListener::bind(("127.0.0.1", CODEX_OAUTH_CALLBACK_PORT)).map_err(|e| {
+        if e.kind() == ErrorKind::AddrInUse {
+            format!(
+                "{}:{}（请关闭占用 1455 端口的进程后重试）",
+                CODEX_OAUTH_PORT_IN_USE_CODE, CODEX_OAUTH_CALLBACK_PORT
+            )
+        } else {
+            format!(
+                "绑定 OAuth 回调端口失败 ({}): {e}",
+                CODEX_OAUTH_CALLBACK_PORT
+            )
+        }
+    })?;
+
+    listener
+        .set_nonblocking(true)
+        .map_err(|e| format!("设置 OAuth 回调监听失败: {e}"))?;
+
+    Ok(listener)
+}
+
+fn start_callback_server(
+    listener: TcpListener,
+    session_id: String,
+    expected_state: String,
+    expires_at: i64,
+) {
+    std::thread::spawn(move || {
+        let deadline = std::time::Instant::now()
+            + Duration::from_secs(CODEX_OAUTH_SESSION_TTL_SECONDS.max(1) as u64);
+
+        loop {
+            let should_stop = {
+                let sessions = match CODEX_OAUTH_SESSIONS.lock() {
+                    Ok(s) => s,
+                    Err(_) => break,
+                };
+                match sessions.get(&session_id) {
+                    Some(session) => {
+                        session.state_token != expected_state
+                            || session.auth_code.is_some()
+                            || Utc::now().timestamp() > session.expires_at
+                    }
+                    None => true,
+                }
+            };
+
+            if should_stop
+                || Utc::now().timestamp() > expires_at
+                || std::time::Instant::now() > deadline
+            {
+                break;
+            }
+
+            match listener.accept() {
+                Ok((stream, _)) => {
+                    handle_callback_request(stream, &session_id, &expected_state);
+                }
+                Err(e) if e.kind() == ErrorKind::WouldBlock => {
+                    std::thread::sleep(Duration::from_millis(100));
+                }
+                Err(_) => break,
+            }
+        }
+    });
+}
+
+fn handle_callback_request(mut stream: TcpStream, session_id: &str, expected_state: &str) {
+    let Some(path) = read_http_request_path(&mut stream) else {
+        write_http_response(
+            &mut stream,
+            "400 Bad Request",
+            "text/plain; charset=utf-8",
+            "Bad Request",
+        );
+        return;
+    };
+
+    if path.starts_with("/auth/callback") {
+        let query = path.split_once('?').map(|(_, q)| q).unwrap_or_default();
+        let params = parse_query_params(query);
+        let state = params.get("state").cloned().unwrap_or_default();
+        let code = params.get("code").cloned().unwrap_or_default();
+
+        if state != expected_state {
+            write_http_response(
+                &mut stream,
+                "400 Bad Request",
+                "text/html; charset=utf-8",
+                &oauth_result_html("授权失败", "登录状态已失效，请返回应用重新发起登录。"),
+            );
+            return;
+        }
+
+        if code.trim().is_empty() {
+            write_http_response(
+                &mut stream,
+                "400 Bad Request",
+                "text/html; charset=utf-8",
+                &oauth_result_html("授权失败", "未收到授权码，请关闭页面后重试。"),
+            );
+            return;
+        }
+
+        let stored = {
+            let mut sessions = match CODEX_OAUTH_SESSIONS.lock() {
+                Ok(s) => s,
+                Err(_) => return,
+            };
+            if let Some(session) = sessions.get_mut(session_id) {
+                if session.state_token == expected_state {
+                    session.auth_code = Some(code);
+                    true
+                } else {
+                    false
+                }
+            } else {
+                false
+            }
+        };
+
+        if stored {
+            write_http_response(
+                &mut stream,
+                "200 OK",
+                "text/html; charset=utf-8",
+                &oauth_result_html("授权成功", "你可以关闭此页面并返回 CC Switch。"),
+            );
+        } else {
+            write_http_response(
+                &mut stream,
+                "409 Conflict",
+                "text/html; charset=utf-8",
+                &oauth_result_html("授权失败", "登录会话不存在或已过期，请重新发起登录。"),
+            );
+        }
+        return;
+    }
+
+    if path.starts_with("/cancel") {
+        write_http_response(
+            &mut stream,
+            "200 OK",
+            "text/plain; charset=utf-8",
+            "Login cancelled",
+        );
+        remove_oauth_session(session_id);
+        return;
+    }
+
+    write_http_response(
+        &mut stream,
+        "404 Not Found",
+        "text/plain; charset=utf-8",
+        "Not Found",
+    );
+}
+
+fn read_http_request_path(stream: &mut TcpStream) -> Option<String> {
+    let mut buffer = [0u8; 8192];
+    let mut collected: Vec<u8> = Vec::with_capacity(1024);
+
+    for _ in 0..8 {
+        let n = stream.read(&mut buffer).ok()?;
+        if n == 0 {
+            break;
+        }
+        collected.extend_from_slice(&buffer[..n]);
+        if collected.windows(4).any(|w| w == b"\r\n\r\n") {
+            break;
+        }
+        if n < buffer.len() {
+            break;
+        }
+    }
+
+    let request = String::from_utf8_lossy(&collected);
+    let first_line = request.lines().next()?.trim();
+    let mut parts = first_line.split_whitespace();
+    let _method = parts.next()?;
+    let path = parts.next()?.trim();
+    Some(path.to_string())
+}
+
+fn parse_query_params(query: &str) -> HashMap<String, String> {
+    url::form_urlencoded::parse(query.as_bytes())
+        .into_owned()
+        .collect::<HashMap<String, String>>()
+}
+
+fn write_http_response(stream: &mut TcpStream, status: &str, content_type: &str, body: &str) {
+    let response = format!(
+        "HTTP/1.1 {status}\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+        body.as_bytes().len(),
+        body
+    );
+    let _ = stream.write_all(response.as_bytes());
+    let _ = stream.flush();
+}
+
+fn oauth_result_html(title: &str, message: &str) -> String {
+    format!(
+        r#"<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>{title}</title>
+  <style>
+    body {{ margin: 0; min-height: 100vh; display: grid; place-items: center; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; background: #f6f8fb; }}
+    .card {{ width: min(520px, 90vw); background: #fff; border: 1px solid #e6e9ef; border-radius: 14px; padding: 28px; box-shadow: 0 8px 28px rgba(15,23,42,.08); }}
+    h1 {{ margin: 0 0 12px 0; font-size: 22px; color: #0f172a; }}
+    p {{ margin: 0; color: #334155; line-height: 1.65; }}
+  </style>
+</head>
+<body>
+  <div class="card">
+    <h1>{title}</h1>
+    <p>{message}</p>
+  </div>
+</body>
+</html>"#
+    )
+}
+
+async fn exchange_code_for_token(
+    code: &str,
+    code_verifier: &str,
+    redirect_uri: &str,
+) -> Result<CodexOAuthTokenResponse, String> {
+    let params = [
+        ("grant_type", "authorization_code"),
+        ("code", code),
+        ("redirect_uri", redirect_uri),
+        ("client_id", CODEX_OAUTH_CLIENT_ID),
+        ("code_verifier", code_verifier),
+    ];
+
+    let response = Client::new()
+        .post(CODEX_OAUTH_TOKEN_ENDPOINT)
+        .form(&params)
+        .send()
+        .await
+        .map_err(|e| format!("请求 OAuth Token 失败: {e}"))?;
+
+    let status = response.status();
+    let body = response
+        .text()
+        .await
+        .map_err(|e| format!("读取 OAuth Token 响应失败: {e}"))?;
+
+    if !status.is_success() {
+        let detail = if body.len() > 300 {
+            format!("{}...", &body[..300])
+        } else {
+            body
+        };
+        return Err(format!(
+            "OAuth Token 交换失败 ({}): {}",
+            status.as_u16(),
+            detail
+        ));
+    }
+
+    let payload: CodexOAuthTokenResponse =
+        serde_json::from_str(&body).map_err(|e| format!("解析 OAuth Token 响应失败: {e}"))?;
+
+    if payload.access_token.trim().is_empty() {
+        return Err("OAuth Token 响应缺少 access_token".to_string());
+    }
+
+    Ok(payload)
+}
+
+fn build_auth_json_from_tokens(payload: &CodexOAuthTokenResponse) -> Value {
+    let account_id = payload
+        .id_token
+        .as_deref()
+        .and_then(decode_jwt_payload)
+        .as_ref()
+        .and_then(|claims| extract_account_id_from_claims(Some(claims)));
+
+    let mut tokens_obj = serde_json::Map::new();
+    tokens_obj.insert("access_token".to_string(), json!(payload.access_token));
+    if let Some(refresh_token) = payload
+        .refresh_token
+        .as_ref()
+        .filter(|s| !s.trim().is_empty())
+    {
+        tokens_obj.insert("refresh_token".to_string(), json!(refresh_token));
+    }
+    if let Some(id_token) = payload.id_token.as_ref().filter(|s| !s.trim().is_empty()) {
+        tokens_obj.insert("id_token".to_string(), json!(id_token));
+    }
+    if let Some(account_id) = account_id.as_ref().filter(|s| !s.trim().is_empty()) {
+        tokens_obj.insert("account_id".to_string(), json!(account_id));
+    }
+
+    let mut auth_obj = serde_json::Map::new();
+    auth_obj.insert("auth_mode".to_string(), json!("chatgpt"));
+    auth_obj.insert("last_refresh".to_string(), json!(Utc::now().to_rfc3339()));
+    auth_obj.insert("tokens".to_string(), Value::Object(tokens_obj));
+    auth_obj.insert("access_token".to_string(), json!(payload.access_token));
+    if let Some(refresh_token) = payload
+        .refresh_token
+        .as_ref()
+        .filter(|s| !s.trim().is_empty())
+    {
+        auth_obj.insert("refresh_token".to_string(), json!(refresh_token));
+    }
+    if let Some(id_token) = payload.id_token.as_ref().filter(|s| !s.trim().is_empty()) {
+        auth_obj.insert("id_token".to_string(), json!(id_token));
+    }
+    if let Some(account_id) = account_id {
+        auth_obj.insert("chatgpt_account_id".to_string(), json!(account_id));
+    }
+
+    Value::Object(auth_obj)
 }
 
 fn cleanup_expired_oauth_sessions() {
     let now = Utc::now().timestamp();
     if let Ok(mut sessions) = CODEX_OAUTH_SESSIONS.lock() {
-        let expired_ids: Vec<String> = sessions
-            .iter()
-            .filter_map(|(id, session)| {
-                let expired_by_time = now > session.expires_at;
-                let exited_too_long =
-                    matches!(session.process_status, CodexCliProcessStatus::Exited(_))
-                        && now - session.started_at > 5 * 60;
-                if expired_by_time || exited_too_long {
-                    Some(id.clone())
-                } else {
-                    None
-                }
-            })
-            .collect();
-
-        for id in expired_ids {
-            if let Some(session) = sessions.remove(&id) {
-                let _ = fs::remove_file(&session.log_path);
-            }
-        }
+        sessions.retain(|_, session| {
+            let not_expired = now <= session.expires_at;
+            let not_stuck = now - session.started_at <= CODEX_OAUTH_SESSION_TTL_SECONDS + 60;
+            not_expired && not_stuck
+        });
     }
 }
 
 fn remove_oauth_session(session_id: &str) {
     if let Ok(mut sessions) = CODEX_OAUTH_SESSIONS.lock() {
-        if let Some(session) = sessions.remove(session_id) {
-            let _ = fs::remove_file(&session.log_path);
-        }
+        sessions.remove(session_id);
     }
-}
-
-fn refresh_session_device_flow_from_log(session: &mut CodexCliOauthSession) {
-    if session.verification_uri.is_some() && session.user_code.is_some() {
-        return;
-    }
-
-    if let Ok(log_text) = fs::read_to_string(&session.log_path) {
-        let (verification_uri, user_code) = parse_device_flow_from_log(&log_text);
-        if session.verification_uri.is_none() {
-            session.verification_uri = verification_uri;
-        }
-        if session.user_code.is_none() {
-            session.user_code = user_code;
-        }
-    }
-}
-
-fn parse_device_flow_from_log(raw_text: &str) -> (Option<String>, Option<String>) {
-    let plain = ANSI_ESCAPE_RE.replace_all(raw_text, "");
-    let verification_uri = VERIFICATION_URL_RE
-        .find(&plain)
-        .map(|m| m.as_str().trim().to_string());
-    let user_code = DEVICE_CODE_RE
-        .captures(&plain)
-        .and_then(|caps| caps.get(1))
-        .map(|m| m.as_str().trim().to_string());
-    (verification_uri, user_code)
-}
-
-fn read_log_tail(path: &Path, max_lines: usize) -> Option<String> {
-    let content = fs::read_to_string(path).ok()?;
-    let lines: Vec<&str> = content.lines().collect();
-    let start = lines.len().saturating_sub(max_lines);
-    let tail = lines[start..].join("\n");
-    let sanitized = ANSI_ESCAPE_RE.replace_all(&tail, "").to_string();
-    if sanitized.trim().is_empty() {
-        None
-    } else {
-        Some(sanitized)
-    }
-}
-
-fn try_parse_codex_auth_file() -> Result<Option<ParsedCodexAuth>, String> {
-    let auth_path = crate::codex_config::get_codex_auth_path();
-    if !auth_path.exists() {
-        return Ok(None);
-    }
-
-    let content =
-        fs::read_to_string(&auth_path).map_err(|e| format!("读取 auth.json 失败: {e}"))?;
-    let auth_json: Value =
-        serde_json::from_str(&content).map_err(|e| format!("解析 auth.json 失败: {e}"))?;
-
-    let access_token = auth_json
-        .get("tokens")
-        .and_then(Value::as_object)
-        .and_then(|tokens| tokens.get("access_token"))
-        .and_then(Value::as_str)
-        .or_else(|| auth_json.get("access_token").and_then(Value::as_str))
-        .filter(|s| !s.trim().is_empty())
-        .map(str::to_string);
-
-    let Some(access_token) = access_token else {
-        return Ok(None);
-    };
-
-    let id_token = auth_json
-        .get("tokens")
-        .and_then(Value::as_object)
-        .and_then(|tokens| tokens.get("id_token"))
-        .and_then(Value::as_str)
-        .filter(|s| !s.trim().is_empty())
-        .map(str::to_string);
-
-    Ok(Some(ParsedCodexAuth {
-        auth_json,
-        access_token,
-        id_token,
-        file_mtime: file_mtime_unix(&auth_path),
-    }))
-}
-
-fn file_mtime_unix(path: &Path) -> Option<i64> {
-    let modified = fs::metadata(path).ok()?.modified().ok()?;
-    let duration = modified.duration_since(UNIX_EPOCH).ok()?;
-    i64::try_from(duration.as_secs()).ok()
 }
 
 #[tauri::command]
@@ -563,7 +693,6 @@ pub async fn codex_get_quota(
 
     Ok(parse_quota_payload(&body))
 }
-
 fn extract_token_and_context(
     provider: &Provider,
 ) -> Result<(String, Option<String>, Option<String>), String> {
@@ -836,31 +965,26 @@ async fn fetch_user_email(client: &Client, access_token: &str) -> Result<Option<
 
 #[cfg(test)]
 mod tests {
-    use super::parse_device_flow_from_log;
+    use super::{build_auth_url, parse_query_params};
 
     #[test]
-    fn parse_device_flow_from_log_extracts_url_and_code() {
-        let sample = format!(
-            "\nWelcome to Codex [v0.98.0]\n\
-             Follow these steps to sign in with ChatGPT using device code authorization:\n\
-             \n\
-             1. Open this link in your browser and sign in to your account\n\
-             \u{1b}[94mhttps://auth.openai.com/codex/device\u{1b}[0m\n\
-             \n\
-             2. Enter this one-time code\n\
-             \u{1b}[94mABCD-1234\u{1b}[0m\n"
-        );
-
-        let (url, code) = parse_device_flow_from_log(&sample);
-        assert_eq!(url.as_deref(), Some("https://auth.openai.com/codex/device"));
-        assert_eq!(code.as_deref(), Some("ABCD-1234"));
+    fn parse_query_params_decodes_values() {
+        let params = parse_query_params("code=abc%2B123&state=xyz%20test");
+        assert_eq!(params.get("code").map(String::as_str), Some("abc+123"));
+        assert_eq!(params.get("state").map(String::as_str), Some("xyz test"));
     }
 
     #[test]
-    fn parse_device_flow_from_log_handles_missing_values() {
-        let sample = "Codex login started";
-        let (url, code) = parse_device_flow_from_log(sample);
-        assert!(url.is_none());
-        assert!(code.is_none());
+    fn build_auth_url_contains_pkce_and_callback() {
+        let url = build_auth_url(
+            "http://localhost:1455/auth/callback",
+            "challenge-value",
+            "state-token",
+        )
+        .expect("build url");
+        assert!(url.contains("code_challenge=challenge-value"));
+        assert!(url.contains("code_challenge_method=S256"));
+        assert!(url.contains("state=state-token"));
+        assert!(url.contains("redirect_uri=http%3A%2F%2Flocalhost%3A1455%2Fauth%2Fcallback"));
     }
 }

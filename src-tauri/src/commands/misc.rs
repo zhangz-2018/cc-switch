@@ -7,6 +7,7 @@ use once_cell::sync::Lazy;
 use regex::Regex;
 use std::path::Path;
 use std::str::FromStr;
+use std::process::Command;
 use tauri::AppHandle;
 use tauri::State;
 use tauri_plugin_opener::OpenerExt;
@@ -55,6 +56,119 @@ pub async fn is_portable_mode() -> Result<bool, String> {
         Ok(dir.join("portable.ini").is_file())
     } else {
         Ok(false)
+    }
+}
+
+/// 重启 Codex CLI（清理本地凭证缓存），用于切换 Token 后生效。
+#[tauri::command]
+pub async fn restart_codex_cli() -> Result<bool, String> {
+    #[cfg(target_os = "windows")]
+    let output = Command::new("taskkill")
+        .args(["/IM", "codex.exe", "/F"])
+        .creation_flags(CREATE_NO_WINDOW)
+        .output();
+
+    #[cfg(not(target_os = "windows"))]
+    let output = Command::new("pkill").arg("-f").arg("codex").output();
+
+    match output {
+        Ok(out) => {
+            if !out.status.success() {
+                let stderr = String::from_utf8_lossy(&out.stderr).to_string();
+                if !stderr.trim().is_empty() {
+                    return Err(format!("重启 Codex CLI 失败: {stderr}"));
+                }
+            }
+            Ok(true)
+        }
+        Err(e) => Err(format!("重启 Codex CLI 失败: {e}")),
+    }
+}
+
+/// 重启 Codex App（桌面客户端），用于切换 Token 后刷新会话。
+#[tauri::command]
+pub async fn restart_codex_app() -> Result<bool, String> {
+    #[cfg(target_os = "windows")]
+    {
+        let kill_output = Command::new("taskkill")
+            .args(["/IM", "Codex.exe", "/F"])
+            .creation_flags(CREATE_NO_WINDOW)
+            .output();
+
+        if let Ok(out) = kill_output {
+            if !out.status.success() {
+                let stderr = String::from_utf8_lossy(&out.stderr).to_string();
+                if !stderr.trim().is_empty() {
+                    log::warn!("结束 Codex App 进程失败（继续尝试启动）: {stderr}");
+                }
+            }
+        }
+
+        let launch = Command::new("cmd")
+            .args(["/C", "start", "", "Codex"])
+            .creation_flags(CREATE_NO_WINDOW)
+            .output()
+            .map_err(|e| format!("启动 Codex App 失败: {e}"))?;
+
+        if !launch.status.success() {
+            let stderr = String::from_utf8_lossy(&launch.stderr).to_string();
+            if !stderr.trim().is_empty() {
+                return Err(format!("启动 Codex App 失败: {stderr}"));
+            }
+        }
+
+        return Ok(true);
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        // 直接强制结束，避免 Codex App 弹出「Quit Codex?」确认框阻塞自动切换流程。
+        let _ = Command::new("killall").args(["-9", "Codex"]).output();
+        let _ = Command::new("killall")
+            .args(["-9", "Codex Helper"])
+            .output();
+        let _ = Command::new("pkill")
+            .args(["-9", "-if", "/codex.app/contents/macos/codex"])
+            .output();
+        let _ = Command::new("pkill")
+            .args(["-9", "-if", "codex app-server"])
+            .output();
+
+        // 给系统一点时间释放进程资源，避免紧接着 open -n 失败。
+        std::thread::sleep(std::time::Duration::from_millis(250));
+
+        let launch = Command::new("open")
+            .args(["-n", "-a", "Codex"])
+            .output()
+            .map_err(|e| format!("启动 Codex App 失败: {e}"))?;
+
+        if !launch.status.success() {
+            let stderr = String::from_utf8_lossy(&launch.stderr).to_string();
+            if !stderr.trim().is_empty() {
+                return Err(format!("启动 Codex App 失败: {stderr}"));
+            }
+        }
+
+        return Ok(true);
+    }
+
+    #[cfg(target_os = "linux")]
+    {
+        let _ = Command::new("pkill").arg("-f").arg("codex").output();
+
+        let launch = Command::new("sh")
+            .args(["-lc", "nohup codex app >/dev/null 2>&1 &"])
+            .output()
+            .map_err(|e| format!("启动 Codex App 失败: {e}"))?;
+
+        if !launch.status.success() {
+            let stderr = String::from_utf8_lossy(&launch.stderr).to_string();
+            if !stderr.trim().is_empty() {
+                return Err(format!("启动 Codex App 失败: {stderr}"));
+            }
+        }
+
+        Ok(true)
     }
 }
 

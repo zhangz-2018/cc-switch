@@ -406,6 +406,17 @@ impl ProviderService {
         // Sync to live (write_gemini_live handles security flag internally for Gemini)
         write_live_snapshot(&app_type, provider)?;
 
+        // Codex: clear local CLI cache to ensure new token is used immediately
+        if matches!(app_type, AppType::Codex) {
+            if let Err(e) = crate::services::codex_cache::clear_codex_auth_cache() {
+                log::warn!("清理 Codex 本地缓存失败（不影响切换结果）: {e}");
+            }
+            // 统一在后端自动重启 Codex App，确保所有切换入口都生效且无需手动操作。
+            if let Err(e) = futures::executor::block_on(crate::commands::restart_codex_app()) {
+                log::warn!("自动重启 Codex App 失败（不影响切换结果）: {e}");
+            }
+        }
+
         // Sync MCP
         McpService::sync_all_enabled(state)?;
 

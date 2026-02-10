@@ -69,6 +69,7 @@ import {
 import { useProvidersQuery } from "@/lib/query/queries";
 import { settingsApi } from "@/lib/api";
 import { codexApi } from "@/lib/api/codex";
+import { antigravityApi } from "@/lib/api";
 
 const CLAUDE_DEFAULT_CONFIG = JSON.stringify({ env: {} }, null, 2);
 const CODEX_DEFAULT_CONFIG = JSON.stringify({ auth: {}, config: "" }, null, 2);
@@ -160,6 +161,8 @@ export function ProviderForm({
     useState(false);
   const [codexOauthLoading, setCodexOauthLoading] = useState(false);
   const [codexOauthStatus, setCodexOauthStatus] = useState("");
+  const [isImportingAntigravitySession, setIsImportingAntigravitySession] =
+    useState(false);
 
   // 新建供应商：收集端点测速弹窗中的"自定义端点"，提交时一次性落盘到 meta.custom_endpoints
   // 编辑供应商：端点已通过 API 直接保存，不再需要此状态
@@ -647,6 +650,49 @@ export function ProviderForm({
     [originalHandleGeminiModelsChange, form],
   );
 
+  const handleImportAntigravitySession = useCallback(async () => {
+    setIsImportingAntigravitySession(true);
+    try {
+      const session = await antigravityApi.importCurrentSession();
+      const envObj = envStringToObj(geminiEnv);
+
+      envObj.ANTIGRAVITY_ACCESS_TOKEN = session.accessToken;
+      envObj.ANTIGRAVITY_REFRESH_TOKEN = session.refreshToken;
+      envObj.ANTIGRAVITY_EMAIL = session.email;
+      envObj.ANTIGRAVITY_EXPIRES_AT = String(session.expiresAt);
+      if (session.projectId) {
+        envObj.ANTIGRAVITY_PROJECT_ID = session.projectId;
+      }
+
+      const nextEnv = envObjToString(envObj);
+      handleGeminiEnvChange(nextEnv);
+
+      try {
+        const config = JSON.parse(form.getValues("settingsConfig") || "{}");
+        config.env = envObj;
+        form.setValue("settingsConfig", JSON.stringify(config, null, 2));
+      } catch {
+        // ignore settingsConfig parse error, env editor already updated
+      }
+
+      toast.success(
+        t("provider.form.gemini.importAntigravitySuccess", {
+          defaultValue: "已导入 Antigravity 账号会话",
+        }),
+      );
+    } catch (error) {
+      toast.error(
+        error instanceof Error
+          ? error.message
+          : t("provider.form.gemini.importAntigravityFailed", {
+              defaultValue: "导入 Antigravity 账号失败",
+            }),
+      );
+    } finally {
+      setIsImportingAntigravitySession(false);
+    }
+  }, [envStringToObj, geminiEnv, envObjToString, handleGeminiEnvChange, form, t]);
+
   // 使用 Gemini 通用配置 hook (仅 Gemini 模式)
   const {
     useCommonConfig: useGeminiCommonConfigFlag,
@@ -967,7 +1013,21 @@ export function ProviderForm({
           );
           return;
         }
-        if (!geminiApiKey.trim()) {
+        const partnerKey = (
+          geminiPartnerPromotionKey ??
+          initialData?.meta?.partnerPromotionKey ??
+          ""
+        ).toLowerCase();
+        const envObj = envStringToObj(geminiEnv);
+        const hasAntigravityTokenBundle =
+          !!envObj.ANTIGRAVITY_ACCESS_TOKEN &&
+          !!envObj.ANTIGRAVITY_REFRESH_TOKEN &&
+          !!envObj.ANTIGRAVITY_EMAIL;
+
+        if (
+          !geminiApiKey.trim() &&
+          !(partnerKey === "antigravity" && hasAntigravityTokenBundle)
+        ) {
           toast.error(
             t("providerForm.apiKeyRequired", {
               defaultValue: "非官方供应商请填写 API Key",
@@ -1189,6 +1249,10 @@ export function ProviderForm({
     presetEntries,
     formWebsiteUrl: form.watch("websiteUrl") || "",
   });
+  const effectiveGeminiPartnerPromotionKey =
+    geminiPartnerPromotionKey ?? initialData?.meta?.partnerPromotionKey;
+  const effectiveGeminiIsPartner =
+    isGeminiPartner || initialData?.meta?.isPartner === true;
 
   // 使用 API Key 链接 hook (OpenCode)
   const {
@@ -1521,8 +1585,10 @@ export function ProviderForm({
             category={category}
             shouldShowApiKeyLink={shouldShowGeminiApiKeyLink}
             websiteUrl={geminiWebsiteUrl}
-            isPartner={isGeminiPartner}
-            partnerPromotionKey={geminiPartnerPromotionKey}
+            isPartner={effectiveGeminiIsPartner}
+            partnerPromotionKey={effectiveGeminiPartnerPromotionKey}
+            onImportAntigravitySession={handleImportAntigravitySession}
+            isImportingAntigravitySession={isImportingAntigravitySession}
             shouldShowSpeedTest={shouldShowSpeedTest}
             baseUrl={geminiBaseUrl}
             onBaseUrlChange={handleGeminiBaseUrlChange}

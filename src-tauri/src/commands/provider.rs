@@ -96,6 +96,35 @@ pub fn switch_provider(
         .map_err(|e| e.to_string())
 }
 
+/// 导入本机 Antigravity 客户端当前登录会话
+#[tauri::command]
+pub fn antigravity_import_current_session(
+) -> Result<crate::services::antigravity::AntigravityImportedSession, String> {
+    crate::services::antigravity::import_current_session_from_local_db().map_err(|e| e.to_string())
+}
+
+/// 查询 Antigravity 官方账号多模型余量（按 provider 配置）
+#[allow(non_snake_case)]
+#[tauri::command]
+pub async fn antigravity_get_quota(
+    state: State<'_, AppState>,
+    #[allow(non_snake_case)] providerId: String,
+    app: String,
+) -> Result<crate::services::antigravity::AntigravityQuotaResponse, String> {
+    let app_type = AppType::from_str(&app).map_err(|e| e.to_string())?;
+    let providers = state
+        .db
+        .get_all_providers(app_type.as_str())
+        .map_err(|e| e.to_string())?;
+    let provider = providers
+        .get(&providerId)
+        .ok_or_else(|| format!("供应商不存在: {providerId}"))?;
+
+    crate::services::antigravity::fetch_quota_from_provider(provider)
+        .await
+        .map_err(|e| e.to_string())
+}
+
 fn import_default_config_internal(state: &AppState, app_type: AppType) -> Result<bool, AppError> {
     ProviderService::import_default_config(state, app_type)
 }

@@ -149,14 +149,19 @@ export function ProviderCard({
     return true;
   }, [provider.notes, displayUrl, fallbackUrlText]);
 
-  const usageEnabled = provider.meta?.usage_script?.enabled ?? false;
+  const isGeminiAntigravity =
+    appId === "gemini" &&
+    provider.meta?.partnerPromotionKey?.toLowerCase() === "antigravity";
+  const usageEnabled =
+    (provider.meta?.usage_script?.enabled ?? false) || isGeminiAntigravity;
   const isCodexOfficial = appId === "codex" && provider.category === "official";
 
   // 获取用量数据以判断是否有多套餐
   // OpenCode（累加模式）：使用 isInConfig 代替 isCurrent
   const shouldAutoQuery = appId === "opencode" ? isInConfig : isCurrent;
   const autoQueryInterval = shouldAutoQuery
-    ? provider.meta?.usage_script?.autoQueryInterval || 0
+    ? provider.meta?.usage_script?.autoQueryInterval ||
+      (isGeminiAntigravity ? 5 : 0)
     : 0;
 
   const { data: usage } = useUsageQuery(provider.id, appId, {

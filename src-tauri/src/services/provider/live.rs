@@ -11,6 +11,7 @@ use crate::codex_config::{get_codex_auth_path, get_codex_config_path, normalize_
 use crate::config::{delete_file, get_claude_settings_path, read_json_file, write_json_file};
 use crate::error::AppError;
 use crate::provider::Provider;
+use crate::services::antigravity::{apply_account_from_provider, has_official_credentials};
 use crate::services::mcp::McpService;
 use crate::store::AppState;
 
@@ -454,8 +455,8 @@ pub fn import_default_config(state: &AppState, app_type: AppType) -> Result<bool
 /// Write Gemini live configuration with authentication handling
 pub(crate) fn write_gemini_live(provider: &Provider) -> Result<(), AppError> {
     use crate::gemini_config::{
-        get_gemini_settings_path, json_to_env, validate_gemini_settings_strict,
-        write_gemini_env_atomic,
+        get_gemini_settings_path, json_to_env, validate_gemini_settings,
+        validate_gemini_settings_strict, write_gemini_env_atomic,
     };
 
     // One-time auth type detection to avoid repeated detection
@@ -510,8 +511,15 @@ pub(crate) fn write_gemini_live(provider: &Provider) -> Result<(), AppError> {
             write_gemini_env_atomic(&env_map)?;
         }
         GeminiAuthType::Antigravity => {
-            // Antigravity provider, uses API Key (strict validation on switch)
-            validate_gemini_settings_strict(&provider.settings_config)?;
+            // Antigravity 允许两种模式：
+            // 1) 官方账号模式（ANTIGRAVITY_*），切换时同步到 Antigravity 客户端
+            // 2) API Key 模式（GEMINI_API_KEY），保持原有行为
+            if has_official_credentials(provider) {
+                validate_gemini_settings(&provider.settings_config)?;
+                apply_account_from_provider(provider)?;
+            } else {
+                validate_gemini_settings_strict(&provider.settings_config)?;
+            }
             write_gemini_env_atomic(&env_map)?;
         }
         GeminiAuthType::Packycode => {

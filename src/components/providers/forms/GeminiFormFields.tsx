@@ -1,7 +1,8 @@
 import { useTranslation } from "react-i18next";
 import { FormLabel } from "@/components/ui/form";
 import { Input } from "@/components/ui/input";
-import { Info } from "lucide-react";
+import { Button } from "@/components/ui/button";
+import { Download, Info, Loader2 } from "lucide-react";
 import EndpointSpeedTest from "./EndpointSpeedTest";
 import { ApiKeySection, EndpointField } from "./shared";
 import type { ProviderCategory } from "@/types";
@@ -21,6 +22,8 @@ interface GeminiFormFieldsProps {
   websiteUrl: string;
   isPartner?: boolean;
   partnerPromotionKey?: string;
+  onImportAntigravitySession?: () => void;
+  isImportingAntigravitySession?: boolean;
 
   // Base URL
   shouldShowSpeedTest: boolean;
@@ -54,6 +57,8 @@ export function GeminiFormFields({
   websiteUrl,
   isPartner,
   partnerPromotionKey,
+  onImportAntigravitySession,
+  isImportingAntigravitySession = false,
   shouldShowSpeedTest,
   baseUrl,
   onBaseUrlChange,
@@ -75,6 +80,8 @@ export function GeminiFormFields({
   // 检测是否为 Google 官方（使用 OAuth）
   const isGoogleOfficial =
     partnerPromotionKey?.toLowerCase() === "google-official";
+  const isAntigravityOfficial =
+    partnerPromotionKey?.toLowerCase() === "antigravity";
 
   return (
     <>
@@ -100,8 +107,50 @@ export function GeminiFormFields({
         </div>
       )}
 
+      {/* Antigravity 官方账号导入 */}
+      {isAntigravityOfficial && (
+        <div className="rounded-lg border border-sky-200 bg-sky-50 p-4 dark:border-sky-800 dark:bg-sky-950">
+          <div className="flex flex-col gap-3">
+            <div className="flex gap-3">
+              <Info className="h-5 w-5 flex-shrink-0 text-sky-600 dark:text-sky-400" />
+              <div className="space-y-1">
+                <p className="text-sm font-medium text-sky-900 dark:text-sky-100">
+                  {t("provider.form.gemini.antigravityTitle", {
+                    defaultValue: "Antigravity 官方账号模式",
+                  })}
+                </p>
+                <p className="text-sm text-sky-700 dark:text-sky-300">
+                  {t("provider.form.gemini.antigravityHint", {
+                    defaultValue:
+                      "可一键导入本机 Antigravity 已登录账号。切换到该供应商时会自动同步账号并重启 Antigravity 客户端。",
+                  })}
+                </p>
+              </div>
+            </div>
+            <div>
+              <Button
+                type="button"
+                variant="outline"
+                onClick={onImportAntigravitySession}
+                disabled={isImportingAntigravitySession}
+                className="border-sky-300 text-sky-700 hover:bg-sky-100 dark:border-sky-700 dark:text-sky-300 dark:hover:bg-sky-900/40"
+              >
+                {isImportingAntigravitySession ? (
+                  <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                ) : (
+                  <Download className="mr-2 h-4 w-4" />
+                )}
+                {t("provider.form.gemini.importAntigravitySession", {
+                  defaultValue: "导入当前 Antigravity 账号",
+                })}
+              </Button>
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* API Key 输入框 */}
-      {shouldShowApiKey && !isGoogleOfficial && (
+      {shouldShowApiKey && !isGoogleOfficial && !isAntigravityOfficial && (
         <ApiKeySection
           value={apiKey}
           onChange={onApiKeyChange}

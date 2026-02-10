@@ -201,7 +201,9 @@ export function ProviderList({
   const geminiUsageProviders = useMemo(() => {
     if (appId !== "gemini") return [];
     return sortedProviders.filter(
-      (provider) => provider.meta?.usage_script?.enabled === true,
+      (provider) =>
+        provider.meta?.usage_script?.enabled === true ||
+        provider.meta?.partnerPromotionKey?.toLowerCase() === "antigravity",
     );
   }, [appId, sortedProviders]);
 

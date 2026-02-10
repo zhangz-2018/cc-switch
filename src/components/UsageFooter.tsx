@@ -28,9 +28,13 @@ const UsageFooter: React.FC<UsageFooterProps> = ({
 
   // 统一的用量查询（自动查询仅对当前激活的供应商启用）
   // OpenCode（累加模式）：使用 isInConfig 代替 isCurrent
+  const isGeminiAntigravity =
+    appId === "gemini" &&
+    provider.meta?.partnerPromotionKey?.toLowerCase() === "antigravity";
   const shouldAutoQuery = appId === "opencode" ? isInConfig : isCurrent;
   const autoQueryInterval = shouldAutoQuery
-    ? provider.meta?.usage_script?.autoQueryInterval || 0
+    ? provider.meta?.usage_script?.autoQueryInterval ||
+      (isGeminiAntigravity ? 5 : 0)
     : 0;
 
   const {

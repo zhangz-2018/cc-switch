@@ -774,6 +774,8 @@ pub fn run() {
             commands::delete_provider,
             commands::remove_provider_from_live_config,
             commands::switch_provider,
+            commands::antigravity_import_current_session,
+            commands::antigravity_get_quota,
             commands::codex_oauth_init_device_flow,
             commands::codex_oauth_poll_token,
             commands::codex_get_quota,

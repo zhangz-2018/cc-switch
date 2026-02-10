@@ -72,6 +72,28 @@ export const geminiProviderPresets: GeminiProviderPreset[] = [
     icon: "packycode",
   },
   {
+    name: "Antigravity Official",
+    websiteUrl: "https://antigravity.dev",
+    settingsConfig: {
+      env: {
+        GOOGLE_GEMINI_BASE_URL:
+          "https://daily-cloudcode-pa.sandbox.googleapis.com",
+        GEMINI_MODEL: "gemini-2.5-pro",
+        ANTIGRAVITY_ACCESS_TOKEN: "",
+        ANTIGRAVITY_REFRESH_TOKEN: "",
+        ANTIGRAVITY_EMAIL: "",
+        ANTIGRAVITY_EXPIRES_AT: "",
+        ANTIGRAVITY_PROJECT_ID: "",
+      },
+    },
+    description: "Antigravity 官方账号（支持账号切换与多模型余量）",
+    category: "official",
+    isPartner: true,
+    partnerPromotionKey: "antigravity",
+    icon: "gemini",
+    iconColor: "#0EA5E9",
+  },
+  {
     name: "Cubence",
     websiteUrl: "https://cubence.com",
     apiKeyUrl: "https://cubence.com/signup?code=CCSWITCH&source=ccs",

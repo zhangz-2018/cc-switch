@@ -5,6 +5,7 @@
 use crate::app_config::AppType;
 use crate::error::AppError;
 use crate::provider::{UsageData, UsageResult, UsageScript};
+use crate::services::antigravity;
 use crate::settings;
 use crate::store::AppState;
 use crate::usage_script;
@@ -119,7 +120,12 @@ pub async fn query_usage(
     app_type: AppType,
     provider_id: &str,
 ) -> Result<UsageResult, AppError> {
-    let (script_code, timeout, api_key, base_url, access_token, user_id, template_type) = {
+    let (
+        script_config,
+        api_key_from_provider,
+        base_url_from_provider,
+        should_use_antigravity_quota,
+    ) = {
         let providers = state.db.get_all_providers(app_type.as_str())?;
         let provider = providers.get(provider_id).ok_or_else(|| {
             AppError::localized(
@@ -133,57 +139,74 @@ pub async fn query_usage(
             .meta
             .as_ref()
             .and_then(|m| m.usage_script.as_ref())
-            .ok_or_else(|| {
-                AppError::localized(
-                    "provider.usage.script.missing",
-                    "未配置用量查询脚本",
-                    "Usage script is not configured",
-                )
-            })?;
-        if !usage_script.enabled {
-            return Err(AppError::localized(
-                "provider.usage.disabled",
-                "用量查询未启用",
-                "Usage query is disabled",
-            ));
-        }
+            .cloned();
 
-        // Get credentials: prioritize UsageScript values, fallback to provider config
+        let should_use_antigravity_quota =
+            app_type == AppType::Gemini && antigravity::is_antigravity_provider(provider);
+
+        (
+            usage_script,
+            extract_api_key_from_provider(provider),
+            extract_base_url_from_provider(provider),
+            should_use_antigravity_quota,
+        )
+    };
+
+    // 优先使用已启用的脚本配置（保持现有行为）
+    if let Some(usage_script) = script_config.as_ref().filter(|s| s.enabled) {
         let api_key = usage_script
             .api_key
             .clone()
             .filter(|k| !k.is_empty())
-            .or_else(|| extract_api_key_from_provider(provider))
+            .or(api_key_from_provider)
             .unwrap_or_default();
 
         let base_url = usage_script
             .base_url
             .clone()
             .filter(|u| !u.is_empty())
-            .or_else(|| extract_base_url_from_provider(provider))
+            .or(base_url_from_provider)
             .unwrap_or_default();
 
-        (
-            usage_script.code.clone(),
+        return execute_and_format_usage_result(
+            &usage_script.code,
+            &api_key,
+            &base_url,
             usage_script.timeout.unwrap_or(10),
-            api_key,
-            base_url,
-            usage_script.access_token.clone(),
-            usage_script.user_id.clone(),
-            usage_script.template_type.clone(),
+            usage_script.access_token.as_deref(),
+            usage_script.user_id.as_deref(),
+            usage_script.template_type.as_deref(),
         )
-    };
+        .await;
+    }
 
-    execute_and_format_usage_result(
-        &script_code,
-        &api_key,
-        &base_url,
-        timeout,
-        access_token.as_deref(),
-        user_id.as_deref(),
-        template_type.as_deref(),
-    )
-    .await
+    // Gemini Antigravity 官方账号：无脚本时自动走多模型余量接口
+    if should_use_antigravity_quota {
+        let providers = state.db.get_all_providers(app_type.as_str())?;
+        let provider = providers.get(provider_id).ok_or_else(|| {
+            AppError::localized(
+                "provider.not_found",
+                format!("供应商不存在: {provider_id}"),
+                format!("Provider not found: {provider_id}"),
+            )
+        })?;
+        return antigravity::query_usage_from_provider(provider).await;
+    }
+
+    // 其他供应商保持原有错误提示
+    if script_config.is_none() {
+        return Err(AppError::localized(
+            "provider.usage.script.missing",
+            "未配置用量查询脚本",
+            "Usage script is not configured",
+        ));
+    }
+
+    Err(AppError::localized(
+        "provider.usage.disabled",
+        "用量查询未启用",
+        "Usage query is disabled",
+    ))
 }
 
 /// Test usage script (using temporary script content, not saved)

@@ -1,5 +1,5 @@
 import { useMemo, useState, useEffect, useRef } from "react";
-import { GripVertical, ChevronDown, ChevronUp } from "lucide-react";
+import { GripVertical, ChevronDown, ChevronUp, RefreshCw } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import type {
   DraggableAttributes,
@@ -15,6 +15,10 @@ import { ProviderHealthBadge } from "@/components/providers/ProviderHealthBadge"
 import { FailoverPriorityBadge } from "@/components/providers/FailoverPriorityBadge";
 import { useProviderHealth } from "@/lib/query/failover";
 import { useCodexQuotaQuery, useUsageQuery } from "@/lib/query/queries";
+import {
+  isGeminiAntigravityProvider,
+  isGeminiUsageProvider,
+} from "@/components/providers/geminiProviderUtils";
 
 interface DragHandleProps {
   attributes: DraggableAttributes;
@@ -97,6 +101,14 @@ const formatResetTime = (resetAt: number) => {
   return `${mins}m`;
 };
 
+const formatUsageRefreshedAt = (timestamp: number) => {
+  const diff = Math.max(0, Math.floor((Date.now() - timestamp) / 1000));
+  if (diff < 60) return "刚刚";
+  if (diff < 3600) return `${Math.floor(diff / 60)} 分钟前`;
+  if (diff < 86400) return `${Math.floor(diff / 3600)} 小时前`;
+  return `${Math.floor(diff / 86400)} 天前`;
+};
+
 export function ProviderCard({
   provider,
   isCurrent,
@@ -149,11 +161,8 @@ export function ProviderCard({
     return true;
   }, [provider.notes, displayUrl, fallbackUrlText]);
 
-  const isGeminiAntigravity =
-    appId === "gemini" &&
-    provider.meta?.partnerPromotionKey?.toLowerCase() === "antigravity";
-  const usageEnabled =
-    (provider.meta?.usage_script?.enabled ?? false) || isGeminiAntigravity;
+  const isGeminiAntigravity = isGeminiAntigravityProvider(provider, appId);
+  const usageEnabled = isGeminiUsageProvider(provider, appId);
   const isCodexOfficial = appId === "codex" && provider.category === "official";
 
   // 获取用量数据以判断是否有多套餐
@@ -164,7 +173,12 @@ export function ProviderCard({
       (isGeminiAntigravity ? 5 : 0)
     : 0;
 
-  const { data: usage } = useUsageQuery(provider.id, appId, {
+  const {
+    data: usage,
+    isFetching: usageLoading,
+    refetch: refetchUsage,
+    lastQueriedAt,
+  } = useUsageQuery(provider.id, appId, {
     enabled: usageEnabled,
     autoQueryInterval,
   });
@@ -398,6 +412,25 @@ export function ProviderCard({
                       defaultValue: `${usage?.data?.length || 0} 个套餐`,
                     })}
                   </span>
+                  {lastQueriedAt ? (
+                    <span className="text-[11px] text-muted-foreground">
+                      刷新: {formatUsageRefreshedAt(lastQueriedAt)}
+                    </span>
+                  ) : null}
+                  <button
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      void refetchUsage();
+                    }}
+                    className="p-1 rounded hover:bg-muted transition-colors disabled:opacity-50"
+                    title={t("usage.refreshUsage", { defaultValue: "刷新余量" })}
+                    disabled={usageLoading}
+                  >
+                    <RefreshCw
+                      size={12}
+                      className={usageLoading ? "animate-spin" : ""}
+                    />
+                  </button>
                 </div>
               ) : (
                 <UsageFooter

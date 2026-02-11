@@ -30,7 +30,9 @@ pub(crate) use live::sanitize_claude_settings_for_live;
 pub(crate) use live::write_live_snapshot;
 
 // Internal re-exports
-use live::{remove_opencode_provider_from_live, write_gemini_live};
+use live::{
+    apply_gemini_runtime_side_effects, remove_opencode_provider_from_live, write_gemini_live,
+};
 use usage::validate_usage_script;
 
 /// Provider business logic service
@@ -344,6 +346,15 @@ impl ProviderService {
                     .update_live_backup_from_provider(app_type.as_str(), provider),
             )
             .map_err(|e| AppError::Message(format!("更新 Live 备份失败: {e}")))?;
+
+            // Gemini 热切换时也执行必要的运行时副作用：
+            // - Google Official: 确保 security.auth.selectedType=oauth-personal
+            // - Antigravity 官方账号：同步账号并触发客户端重载
+            if matches!(app_type, AppType::Gemini) {
+                if let Err(e) = apply_gemini_runtime_side_effects(provider) {
+                    log::warn!("Gemini 热切换运行时副作用执行失败（不影响切换结果）: {e}");
+                }
+            }
 
             // 关键修复：接管模式下切换供应商不会写回 Live 配置，
             // 需要主动清理 Claude Live 中的“模型覆盖”字段，避免仍以旧模型名发起请求。

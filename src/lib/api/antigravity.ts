@@ -24,6 +24,10 @@ export interface AntigravityQuotaResponse {
 }
 
 export const antigravityApi = {
+  async startLogin(): Promise<boolean> {
+    return invoke("antigravity_start_login");
+  },
+
   async importCurrentSession(): Promise<AntigravityImportedSession> {
     return invoke("antigravity_import_current_session");
   },

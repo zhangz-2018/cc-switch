@@ -70,6 +70,7 @@ import { useProvidersQuery } from "@/lib/query/queries";
 import { settingsApi } from "@/lib/api";
 import { codexApi } from "@/lib/api/codex";
 import { antigravityApi } from "@/lib/api";
+import { geminiApi } from "@/lib/api/gemini";
 
 const CLAUDE_DEFAULT_CONFIG = JSON.stringify({ env: {} }, null, 2);
 const CODEX_DEFAULT_CONFIG = JSON.stringify({ auth: {}, config: "" }, null, 2);
@@ -99,6 +100,29 @@ const OPENCODE_DEFAULT_CONFIG = JSON.stringify(
 );
 
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+
+const getUnknownErrorMessage = (
+  error: unknown,
+  fallback: string,
+): string => {
+  if (error instanceof Error && error.message.trim()) {
+    return error.message;
+  }
+  if (typeof error === "string" && error.trim()) {
+    return error;
+  }
+  if (error && typeof error === "object") {
+    const maybeMessage = (error as { message?: unknown }).message;
+    if (typeof maybeMessage === "string" && maybeMessage.trim()) {
+      return maybeMessage;
+    }
+    const maybeError = (error as { error?: unknown }).error;
+    if (typeof maybeError === "string" && maybeError.trim()) {
+      return maybeError;
+    }
+  }
+  return fallback;
+};
 
 type PresetEntry = {
   id: string;
@@ -161,7 +185,11 @@ export function ProviderForm({
     useState(false);
   const [codexOauthLoading, setCodexOauthLoading] = useState(false);
   const [codexOauthStatus, setCodexOauthStatus] = useState("");
+  const [isStartingGoogleLogin, setIsStartingGoogleLogin] = useState(false);
+  const [googleOauthStatus, setGoogleOauthStatus] = useState("");
   const [isImportingAntigravitySession, setIsImportingAntigravitySession] =
+    useState(false);
+  const [isStartingAntigravityLogin, setIsStartingAntigravityLogin] =
     useState(false);
 
   // 新建供应商：收集端点测速弹窗中的"自定义端点"，提交时一次性落盘到 meta.custom_endpoints
@@ -650,12 +678,139 @@ export function ProviderForm({
     [originalHandleGeminiModelsChange, form],
   );
 
-  const handleImportAntigravitySession = useCallback(async () => {
-    setIsImportingAntigravitySession(true);
-    try {
-      const session = await antigravityApi.importCurrentSession();
+  const applyGoogleOAuthSession = useCallback(
+    (payload: {
+      accessToken: string;
+      refreshToken: string;
+      expiresAt?: number;
+      email?: string;
+    }) => {
       const envObj = envStringToObj(geminiEnv);
+      envObj.GOOGLE_OAUTH_ACCESS_TOKEN = payload.accessToken;
+      envObj.GOOGLE_OAUTH_REFRESH_TOKEN = payload.refreshToken;
+      envObj.GOOGLE_OAUTH_EXPIRES_AT = String(
+        payload.expiresAt ?? Math.floor(Date.now() / 1000) + 3600,
+      );
+      if (payload.email) {
+        envObj.GOOGLE_OAUTH_EMAIL = payload.email;
+      }
 
+      // 兼容现有 Gemini 代理适配器：将 access token 写入 GEMINI_API_KEY。
+      envObj.GEMINI_API_KEY = payload.accessToken;
+
+      const nextEnv = envObjToString(envObj);
+      handleGeminiEnvChange(nextEnv);
+
+      try {
+        const config = JSON.parse(form.getValues("settingsConfig") || "{}");
+        config.env = envObj;
+        form.setValue("settingsConfig", JSON.stringify(config, null, 2));
+      } catch {
+        // ignore settingsConfig parse error, env editor already updated
+      }
+
+      if (payload.email && !form.getValues("notes")?.trim()) {
+        form.setValue("notes", payload.email);
+      }
+    },
+    [envStringToObj, geminiEnv, envObjToString, handleGeminiEnvChange, form],
+  );
+
+  const handleStartGoogleLogin = useCallback(async () => {
+    setIsStartingGoogleLogin(true);
+    try {
+      setGoogleOauthStatus(
+        t("provider.form.gemini.googleOauthInit", {
+          defaultValue: "正在初始化 Google 登录流程...",
+        }),
+      );
+
+      const flow = await geminiApi.initOAuthLogin();
+      const verificationUrl =
+        flow.verificationUriComplete || flow.verificationUri;
+
+      await settingsApi.openExternal(verificationUrl);
+      setGoogleOauthStatus(
+        t("provider.form.gemini.googleOauthWaiting", {
+          defaultValue: "浏览器已打开，请完成 Google 授权...",
+        }),
+      );
+
+      const intervalMs = Math.max(flow.interval, 2) * 1000;
+      const deadline = Date.now() + Math.max(flow.expiresIn, 60) * 1000;
+
+      while (Date.now() < deadline) {
+        await sleep(intervalMs);
+        const result = await geminiApi.pollOAuthToken(flow.deviceCode);
+
+        if (result.status === "pending") {
+          setGoogleOauthStatus(
+            t("provider.form.gemini.googleOauthPending", {
+              defaultValue: "等待浏览器确认登录...",
+            }),
+          );
+          continue;
+        }
+
+        if (
+          result.status === "success" &&
+          result.accessToken &&
+          result.refreshToken
+        ) {
+          applyGoogleOAuthSession({
+            accessToken: result.accessToken,
+            refreshToken: result.refreshToken,
+            expiresAt: result.expiresAt,
+            email: result.email,
+          });
+          const successText = t("provider.form.gemini.googleOauthSuccess", {
+            defaultValue: "Google 登录成功，Token 已保存",
+          });
+          setGoogleOauthStatus(successText);
+          toast.success(
+            result.email
+              ? `${successText}（${result.email}）`
+              : successText,
+          );
+          return;
+        }
+
+        throw new Error(
+          result.errorDescription ||
+            result.error ||
+            t("provider.form.gemini.startGoogleLoginFailed", {
+              defaultValue: "Google 登录失败，请重试",
+            }),
+        );
+      }
+
+      throw new Error(
+        t("provider.form.gemini.googleOauthTimeout", {
+          defaultValue: "Google 登录超时，请重试",
+        }),
+      );
+    } catch (error) {
+      const message = getUnknownErrorMessage(
+        error,
+        t("provider.form.gemini.startGoogleLoginFailed", {
+          defaultValue: "Google 登录失败，请重试",
+        }),
+      );
+      setGoogleOauthStatus(message);
+      toast.error(
+        message,
+      );
+    } finally {
+      setIsStartingGoogleLogin(false);
+    }
+  }, [applyGoogleOAuthSession, t]);
+
+  const applyAntigravitySession = useCallback(
+    (
+      session: Awaited<ReturnType<typeof antigravityApi.importCurrentSession>>,
+      successMessage?: string,
+    ) => {
+      const envObj = envStringToObj(geminiEnv);
       envObj.ANTIGRAVITY_ACCESS_TOKEN = session.accessToken;
       envObj.ANTIGRAVITY_REFRESH_TOKEN = session.refreshToken;
       envObj.ANTIGRAVITY_EMAIL = session.email;
@@ -675,23 +830,88 @@ export function ProviderForm({
         // ignore settingsConfig parse error, env editor already updated
       }
 
-      toast.success(
+      if (successMessage) {
+        toast.success(successMessage);
+      }
+    },
+    [envStringToObj, geminiEnv, envObjToString, handleGeminiEnvChange, form],
+  );
+
+  const handleImportAntigravitySession = useCallback(async () => {
+    setIsImportingAntigravitySession(true);
+    try {
+      const session = await antigravityApi.importCurrentSession();
+      applyAntigravitySession(
+        session,
         t("provider.form.gemini.importAntigravitySuccess", {
           defaultValue: "已导入 Antigravity 账号会话",
         }),
       );
     } catch (error) {
       toast.error(
-        error instanceof Error
-          ? error.message
-          : t("provider.form.gemini.importAntigravityFailed", {
-              defaultValue: "导入 Antigravity 账号失败",
-            }),
+        getUnknownErrorMessage(
+          error,
+          t("provider.form.gemini.importAntigravityFailed", {
+            defaultValue: "导入 Antigravity 账号失败",
+          }),
+        ),
       );
     } finally {
       setIsImportingAntigravitySession(false);
     }
-  }, [envStringToObj, geminiEnv, envObjToString, handleGeminiEnvChange, form, t]);
+  }, [applyAntigravitySession, t]);
+
+  const handleStartAntigravityLogin = useCallback(async () => {
+    setIsStartingAntigravityLogin(true);
+    try {
+      await antigravityApi.startLogin();
+      toast.success(
+        t("provider.form.gemini.startAntigravityLoginSuccess", {
+          defaultValue:
+            "已打开浏览器进入 Google 登录页，完成登录后将自动尝试导入账号会话",
+        }),
+      );
+
+      let imported = false;
+      for (let i = 0; i < 12; i += 1) {
+        await sleep(5000);
+        try {
+          const session = await antigravityApi.importCurrentSession();
+          applyAntigravitySession(
+            session,
+            t("provider.form.gemini.startAntigravityAutoImportSuccess", {
+              defaultValue: "登录完成，已自动导入当前 Antigravity 账号",
+            }),
+          );
+          imported = true;
+          break;
+        } catch {
+          // 等待用户完成浏览器登录，轮询期间静默重试
+        }
+      }
+
+      if (!imported) {
+        toast.info(
+          t("provider.form.gemini.startAntigravityManualImportHint", {
+            defaultValue:
+              "若已完成登录但未自动导入，请点击“导入当前 Antigravity 账号”完成回填",
+          }),
+        );
+      }
+    } catch (error) {
+      toast.error(
+        getUnknownErrorMessage(
+          error,
+          t("provider.form.gemini.startAntigravityLoginFailed", {
+            defaultValue:
+              "拉起浏览器登录失败，请手动访问 accounts.google.com 完成登录",
+          }),
+        ),
+      );
+    } finally {
+      setIsStartingAntigravityLogin(false);
+    }
+  }, [applyAntigravitySession, t]);
 
   // 使用 Gemini 通用配置 hook (仅 Gemini 模式)
   const {
@@ -1167,6 +1387,13 @@ export function ProviderForm({
       payload.meta ?? (initialData?.meta ? { ...initialData.meta } : undefined);
     payload.meta = {
       ...(baseMeta ?? {}),
+      // 预设元信息：始终写入，避免因未配置自定义端点而丢失 partner 标记
+      isPartner:
+        activePreset?.isPartner === true
+          ? true
+          : (baseMeta?.isPartner ?? undefined),
+      partnerPromotionKey:
+        activePreset?.partnerPromotionKey ?? baseMeta?.partnerPromotionKey,
       endpointAutoSelect,
       // 添加高级配置
       testConfig: testConfig.enabled ? testConfig : undefined,
@@ -1589,6 +1816,11 @@ export function ProviderForm({
             partnerPromotionKey={effectiveGeminiPartnerPromotionKey}
             onImportAntigravitySession={handleImportAntigravitySession}
             isImportingAntigravitySession={isImportingAntigravitySession}
+            onStartGoogleLogin={handleStartGoogleLogin}
+            isStartingGoogleLogin={isStartingGoogleLogin}
+            googleLoginStatus={googleOauthStatus}
+            onStartAntigravityLogin={handleStartAntigravityLogin}
+            isStartingAntigravityLogin={isStartingAntigravityLogin}
             shouldShowSpeedTest={shouldShowSpeedTest}
             baseUrl={geminiBaseUrl}
             onBaseUrlChange={handleGeminiBaseUrlChange}

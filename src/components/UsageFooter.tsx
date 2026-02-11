@@ -26,11 +26,29 @@ const UsageFooter: React.FC<UsageFooterProps> = ({
 }) => {
   const { t } = useTranslation();
 
+  const isAntigravityByHeuristic = React.useMemo(() => {
+    if (appId !== "gemini") return false;
+
+    if (provider.meta?.partnerPromotionKey?.toLowerCase() === "antigravity") {
+      return true;
+    }
+    if (provider.name.toLowerCase().includes("antigravity")) {
+      return true;
+    }
+    if (provider.websiteUrl?.toLowerCase().includes("antigravity")) {
+      return true;
+    }
+
+    const baseUrl = provider.settingsConfig?.env?.GOOGLE_GEMINI_BASE_URL;
+    return (
+      typeof baseUrl === "string" &&
+      baseUrl.toLowerCase().includes("daily-cloudcode-pa.sandbox.googleapis.com")
+    );
+  }, [appId, provider]);
+
   // 统一的用量查询（自动查询仅对当前激活的供应商启用）
   // OpenCode（累加模式）：使用 isInConfig 代替 isCurrent
-  const isGeminiAntigravity =
-    appId === "gemini" &&
-    provider.meta?.partnerPromotionKey?.toLowerCase() === "antigravity";
+  const isGeminiAntigravity = isAntigravityByHeuristic;
   const shouldAutoQuery = appId === "opencode" ? isInConfig : isCurrent;
   const autoQueryInterval = shouldAutoQuery
     ? provider.meta?.usage_script?.autoQueryInterval ||

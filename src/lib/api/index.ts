@@ -10,6 +10,7 @@ export { proxyApi } from "./proxy";
 export { sessionsApi } from "./sessions";
 export { codexApi } from "./codex";
 export { antigravityApi } from "./antigravity";
+export { geminiApi } from "./gemini";
 export * as configApi from "./config";
 export type { ProviderSwitchEvent } from "./providers";
 export type { Prompt } from "./prompts";

@@ -463,6 +463,21 @@ pub(crate) fn write_gemini_live(provider: &Provider) -> Result<(), AppError> {
     let auth_type = detect_gemini_auth_type(provider);
 
     let mut env_map = json_to_env(&provider.settings_config)?;
+    let has_google_oauth_credentials = env_map
+        .get("GOOGLE_OAUTH_ACCESS_TOKEN")
+        .map(|v| !v.trim().is_empty())
+        .unwrap_or(false)
+        && env_map
+            .get("GOOGLE_OAUTH_REFRESH_TOKEN")
+            .map(|v| !v.trim().is_empty())
+            .unwrap_or(false);
+    let has_gemini_oauth_token = env_map
+        .get("GEMINI_API_KEY")
+        .map(|v| {
+            let t = v.trim();
+            t.starts_with("ya29.") || t.starts_with('{')
+        })
+        .unwrap_or(false);
 
     // Prepare config to write to ~/.gemini/settings.json
     // Behavior:
@@ -506,8 +521,11 @@ pub(crate) fn write_gemini_live(provider: &Provider) -> Result<(), AppError> {
 
     match auth_type {
         GeminiAuthType::GoogleOfficial => {
-            // Google official uses OAuth, clear env
-            env_map.clear();
+            // Google 官方默认沿用 Gemini CLI 本机 oauth-personal 会话，不写 env。
+            // 但若用户显式通过 CC Switch 完成 OAuth 并保存了 token，则保留 env，便于按账号区分保存。
+            if !has_google_oauth_credentials && !has_gemini_oauth_token {
+                env_map.clear();
+            }
             write_gemini_env_atomic(&env_map)?;
         }
         GeminiAuthType::Antigravity => {
@@ -546,6 +564,24 @@ pub(crate) fn write_gemini_live(provider: &Provider) -> Result<(), AppError> {
         GeminiAuthType::Antigravity | GeminiAuthType::Packycode | GeminiAuthType::Generic => {
             crate::gemini_config::write_packycode_settings()?;
         }
+    }
+
+    Ok(())
+}
+
+/// 在 Gemini 热切换（代理接管）模式下执行必要的运行时副作用，
+/// 但不写入 live 配置文件，避免破坏代理接管状态。
+pub(crate) fn apply_gemini_runtime_side_effects(provider: &Provider) -> Result<(), AppError> {
+    let auth_type = detect_gemini_auth_type(provider);
+
+    match auth_type {
+        GeminiAuthType::GoogleOfficial => ensure_google_oauth_security_flag(provider)?,
+        GeminiAuthType::Antigravity => {
+            if has_official_credentials(provider) {
+                apply_account_from_provider(provider)?;
+            }
+        }
+        GeminiAuthType::Packycode | GeminiAuthType::Generic => {}
     }
 
     Ok(())

@@ -103,6 +103,104 @@ pub fn antigravity_import_current_session(
     crate::services::antigravity::import_current_session_from_local_db().map_err(|e| e.to_string())
 }
 
+/// 拉起浏览器登录入口（Google 账号登录，登录后回到 Antigravity 官网）
+#[tauri::command]
+pub fn antigravity_start_login() -> Result<bool, String> {
+    const GOOGLE_LOGIN_URL: &str =
+        "https://accounts.google.com/ServiceLogin?continue=https%3A%2F%2Fantigravity.dev%2F";
+    const ANTIGRAVITY_WEB_URL: &str = "https://antigravity.dev";
+
+    #[cfg(target_os = "macos")]
+    {
+        let open_google = std::process::Command::new("open")
+            .arg(GOOGLE_LOGIN_URL)
+            .output();
+        if open_google
+            .as_ref()
+            .map(|o| o.status.success())
+            .unwrap_or(false)
+        {
+            return Ok(true);
+        }
+
+        let open_web = std::process::Command::new("open")
+            .arg(ANTIGRAVITY_WEB_URL)
+            .output();
+        if open_web
+            .as_ref()
+            .map(|o| o.status.success())
+            .unwrap_or(false)
+        {
+            return Ok(true);
+        }
+
+        return Err(
+            "无法拉起浏览器登录，请手动访问 https://accounts.google.com 登录后再返回".to_string(),
+        );
+    }
+
+    #[cfg(target_os = "windows")]
+    {
+        let open_google = std::process::Command::new("cmd")
+            .args(["/C", "start", "", GOOGLE_LOGIN_URL])
+            .output();
+        if open_google
+            .as_ref()
+            .map(|o| o.status.success())
+            .unwrap_or(false)
+        {
+            return Ok(true);
+        }
+
+        let open_web = std::process::Command::new("cmd")
+            .args(["/C", "start", "", ANTIGRAVITY_WEB_URL])
+            .output();
+        if open_web
+            .as_ref()
+            .map(|o| o.status.success())
+            .unwrap_or(false)
+        {
+            return Ok(true);
+        }
+
+        return Err(
+            "无法拉起浏览器登录，请手动访问 https://accounts.google.com 登录后再返回".to_string(),
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    {
+        let open_google = std::process::Command::new("xdg-open")
+            .arg(GOOGLE_LOGIN_URL)
+            .output();
+        if open_google
+            .as_ref()
+            .map(|o| o.status.success())
+            .unwrap_or(false)
+        {
+            return Ok(true);
+        }
+
+        let open_web = std::process::Command::new("xdg-open")
+            .arg(ANTIGRAVITY_WEB_URL)
+            .output();
+        if open_web
+            .as_ref()
+            .map(|o| o.status.success())
+            .unwrap_or(false)
+        {
+            return Ok(true);
+        }
+
+        return Err(
+            "无法拉起浏览器登录，请手动访问 https://accounts.google.com 登录后再返回".to_string(),
+        );
+    }
+
+    #[allow(unreachable_code)]
+    Ok(false)
+}
+
 /// 查询 Antigravity 官方账号多模型余量（按 provider 配置）
 #[allow(non_snake_case)]
 #[tauri::command]

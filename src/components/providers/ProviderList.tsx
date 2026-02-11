@@ -27,6 +27,10 @@ import { useDragSort } from "@/hooks/useDragSort";
 import { ProviderCard } from "@/components/providers/ProviderCard";
 import { ProviderEmptyState } from "@/components/providers/ProviderEmptyState";
 import {
+  isGeminiUsageCandidateProvider,
+  isGeminiUsageProvider,
+} from "@/components/providers/geminiProviderUtils";
+import {
   useAutoFailoverEnabled,
   useFailoverQueue,
   useAddToFailoverQueue,
@@ -200,10 +204,15 @@ export function ProviderList({
 
   const geminiUsageProviders = useMemo(() => {
     if (appId !== "gemini") return [];
-    return sortedProviders.filter(
-      (provider) =>
-        provider.meta?.usage_script?.enabled === true ||
-        provider.meta?.partnerPromotionKey?.toLowerCase() === "antigravity",
+    return sortedProviders.filter((provider) =>
+      isGeminiUsageProvider(provider, appId),
+    );
+  }, [appId, sortedProviders]);
+
+  const geminiUsageCandidateProviders = useMemo(() => {
+    if (appId !== "gemini") return [];
+    return sortedProviders.filter((provider) =>
+      isGeminiUsageCandidateProvider(provider, appId),
     );
   }, [appId, sortedProviders]);
 
@@ -254,7 +263,16 @@ export function ProviderList({
   }, [appId, codexOfficialProviders, queryClient, t]);
 
   const handleRefreshGeminiUsage = useCallback(async () => {
-    if (appId !== "gemini" || geminiUsageProviders.length === 0) {
+    if (appId !== "gemini" || geminiUsageCandidateProviders.length === 0) {
+      return;
+    }
+
+    if (geminiUsageProviders.length === 0) {
+      toast.info(
+        t("provider.geminiUsageRefreshNoLogin", {
+          defaultValue: "当前没有可刷新的账号，请先完成登录或导入会话",
+        }),
+      );
       return;
     }
 
@@ -297,7 +315,13 @@ export function ProviderList({
     } finally {
       setIsRefreshingGeminiUsage(false);
     }
-  }, [appId, geminiUsageProviders, queryClient, t]);
+  }, [
+    appId,
+    geminiUsageCandidateProviders.length,
+    geminiUsageProviders,
+    queryClient,
+    t,
+  ]);
 
   if (isLoading) {
     return (
@@ -365,7 +389,7 @@ export function ProviderList({
   return (
     <div className="mt-4 space-y-4">
       {((appId === "codex" && codexOfficialProviders.length > 0) ||
-        (appId === "gemini" && geminiUsageProviders.length > 0)) && (
+        (appId === "gemini" && geminiUsageCandidateProviders.length > 0)) && (
         <div className="flex justify-end">
           <Button
             type="button"

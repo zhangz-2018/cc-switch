@@ -1,10 +1,11 @@
 #![allow(non_snake_case)]
 
-mod config;
 mod codex_auth;
+mod config;
 mod deeplink;
 mod env;
 mod failover;
+mod gemini_auth;
 mod global_proxy;
 mod import_export;
 mod mcp;
@@ -19,11 +20,12 @@ pub mod skill;
 mod stream_check;
 mod usage;
 
-pub use config::*;
 pub use codex_auth::*;
+pub use config::*;
 pub use deeplink::*;
 pub use env::*;
 pub use failover::*;
+pub use gemini_auth::*;
 pub use global_proxy::*;
 pub use import_export::*;
 pub use mcp::*;

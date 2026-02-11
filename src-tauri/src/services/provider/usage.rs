@@ -9,6 +9,7 @@ use crate::services::antigravity;
 use crate::settings;
 use crate::store::AppState;
 use crate::usage_script;
+use super::gemini_auth::is_google_official_gemini;
 
 /// Execute usage script and format result (private helper method)
 pub(crate) async fn execute_and_format_usage_result(
@@ -121,10 +122,12 @@ pub async fn query_usage(
     provider_id: &str,
 ) -> Result<UsageResult, AppError> {
     let (
+        provider_snapshot,
         script_config,
         api_key_from_provider,
         base_url_from_provider,
         should_use_antigravity_quota,
+        should_use_google_oauth_quota,
     ) = {
         let providers = state.db.get_all_providers(app_type.as_str())?;
         let provider = providers.get(provider_id).ok_or_else(|| {
@@ -143,12 +146,17 @@ pub async fn query_usage(
 
         let should_use_antigravity_quota =
             app_type == AppType::Gemini && antigravity::is_antigravity_provider(provider);
+        let should_use_google_oauth_quota = app_type == AppType::Gemini
+            && is_google_official_gemini(provider)
+            && antigravity::has_google_oauth_access_token(provider);
 
         (
+            provider.clone(),
             usage_script,
             extract_api_key_from_provider(provider),
             extract_base_url_from_provider(provider),
             should_use_antigravity_quota,
+            should_use_google_oauth_quota,
         )
     };
 
@@ -180,17 +188,9 @@ pub async fn query_usage(
         .await;
     }
 
-    // Gemini Antigravity 官方账号：无脚本时自动走多模型余量接口
-    if should_use_antigravity_quota {
-        let providers = state.db.get_all_providers(app_type.as_str())?;
-        let provider = providers.get(provider_id).ok_or_else(|| {
-            AppError::localized(
-                "provider.not_found",
-                format!("供应商不存在: {provider_id}"),
-                format!("Provider not found: {provider_id}"),
-            )
-        })?;
-        return antigravity::query_usage_from_provider(provider).await;
+    // Gemini 官方账号：无脚本时自动走多模型余量接口（Antigravity / Google OAuth）
+    if should_use_antigravity_quota || should_use_google_oauth_quota {
+        return antigravity::query_usage_from_provider(&provider_snapshot).await;
     }
 
     // 其他供应商保持原有错误提示

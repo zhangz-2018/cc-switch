@@ -18,6 +18,9 @@ pub const ANTIGRAVITY_REFRESH_TOKEN_KEY: &str = "ANTIGRAVITY_REFRESH_TOKEN";
 pub const ANTIGRAVITY_EMAIL_KEY: &str = "ANTIGRAVITY_EMAIL";
 pub const ANTIGRAVITY_EXPIRES_AT_KEY: &str = "ANTIGRAVITY_EXPIRES_AT";
 pub const ANTIGRAVITY_PROJECT_ID_KEY: &str = "ANTIGRAVITY_PROJECT_ID";
+pub const GOOGLE_OAUTH_ACCESS_TOKEN_KEY: &str = "GOOGLE_OAUTH_ACCESS_TOKEN";
+pub const GOOGLE_OAUTH_EMAIL_KEY: &str = "GOOGLE_OAUTH_EMAIL";
+pub const GOOGLE_OAUTH_PROJECT_ID_KEY: &str = "GOOGLE_OAUTH_PROJECT_ID";
 
 const CLOUD_CODE_BASE_URL: &str = "https://daily-cloudcode-pa.sandbox.googleapis.com";
 const QUOTA_API_URL: &str =
@@ -197,32 +200,22 @@ pub fn apply_account_from_provider(provider: &Provider) -> Result<(), AppError> 
 pub async fn query_usage_from_provider(provider: &Provider) -> Result<UsageResult, AppError> {
     let env_map = extract_env_map_from_provider(provider)?;
 
-    let access_token = env_map
-        .get(ANTIGRAVITY_ACCESS_TOKEN_KEY)
-        .cloned()
-        .filter(|v| !v.trim().is_empty())
+    let access_token = extract_quota_access_token(&env_map)
         .ok_or_else(|| {
             AppError::localized(
-                "antigravity.provider.missing_access_token",
-                "缺少 ANTIGRAVITY_ACCESS_TOKEN，无法查询 Antigravity 余量",
-                "Missing ANTIGRAVITY_ACCESS_TOKEN, cannot query Antigravity quota",
+                "gemini.oauth.missing_access_token",
+                "缺少可用 OAuth Access Token，无法查询模型余量",
+                "Missing OAuth access token, cannot query model quota",
             )
         })?;
 
-    let email = if let Some(v) = env_map
-        .get(ANTIGRAVITY_EMAIL_KEY)
-        .cloned()
-        .filter(|v| !v.trim().is_empty())
-    {
+    let email = if let Some(v) = extract_quota_email(&env_map) {
         v
     } else {
         fetch_user_email_async(&access_token).await?
     };
 
-    let cached_project_id = env_map
-        .get(ANTIGRAVITY_PROJECT_ID_KEY)
-        .cloned()
-        .filter(|v| !v.trim().is_empty());
+    let cached_project_id = extract_cached_project_id(&env_map);
 
     let quota = fetch_quota(&access_token, &email, cached_project_id.as_deref()).await?;
 
@@ -270,34 +263,97 @@ pub async fn fetch_quota_from_provider(
 ) -> Result<AntigravityQuotaResponse, AppError> {
     let env_map = extract_env_map_from_provider(provider)?;
 
-    let access_token = env_map
-        .get(ANTIGRAVITY_ACCESS_TOKEN_KEY)
-        .cloned()
-        .filter(|v| !v.trim().is_empty())
+    let access_token = extract_quota_access_token(&env_map)
         .ok_or_else(|| {
             AppError::localized(
-                "antigravity.provider.missing_access_token",
-                "缺少 ANTIGRAVITY_ACCESS_TOKEN，无法查询 Antigravity 余量",
-                "Missing ANTIGRAVITY_ACCESS_TOKEN, cannot query Antigravity quota",
+                "gemini.oauth.missing_access_token",
+                "缺少可用 OAuth Access Token，无法查询模型余量",
+                "Missing OAuth access token, cannot query model quota",
             )
         })?;
 
-    let email = if let Some(v) = env_map
-        .get(ANTIGRAVITY_EMAIL_KEY)
-        .cloned()
-        .filter(|v| !v.trim().is_empty())
-    {
+    let email = if let Some(v) = extract_quota_email(&env_map) {
         v
     } else {
         fetch_user_email_async(&access_token).await?
     };
 
-    let cached_project_id = env_map
-        .get(ANTIGRAVITY_PROJECT_ID_KEY)
-        .cloned()
-        .filter(|v| !v.trim().is_empty());
+    let cached_project_id = extract_cached_project_id(&env_map);
 
     fetch_quota(&access_token, &email, cached_project_id.as_deref()).await
+}
+
+fn extract_quota_access_token(env_map: &HashMap<String, String>) -> Option<String> {
+    env_map
+        .get(ANTIGRAVITY_ACCESS_TOKEN_KEY)
+        .cloned()
+        .filter(|v| !v.trim().is_empty())
+        .or_else(|| {
+            env_map
+                .get(GOOGLE_OAUTH_ACCESS_TOKEN_KEY)
+                .cloned()
+                .filter(|v| !v.trim().is_empty())
+        })
+        .or_else(|| {
+            env_map
+                .get("GEMINI_API_KEY")
+                .and_then(|v| extract_oauth_access_token_from_gemini_api_key(v))
+        })
+}
+
+fn extract_quota_email(env_map: &HashMap<String, String>) -> Option<String> {
+    env_map
+        .get(ANTIGRAVITY_EMAIL_KEY)
+        .cloned()
+        .filter(|v| !v.trim().is_empty())
+        .or_else(|| {
+            env_map
+                .get(GOOGLE_OAUTH_EMAIL_KEY)
+                .cloned()
+                .filter(|v| !v.trim().is_empty())
+        })
+}
+
+fn extract_cached_project_id(env_map: &HashMap<String, String>) -> Option<String> {
+    env_map
+        .get(ANTIGRAVITY_PROJECT_ID_KEY)
+        .cloned()
+        .filter(|v| !v.trim().is_empty())
+        .or_else(|| {
+            env_map
+                .get(GOOGLE_OAUTH_PROJECT_ID_KEY)
+                .cloned()
+                .filter(|v| !v.trim().is_empty())
+        })
+}
+
+fn extract_oauth_access_token_from_gemini_api_key(raw: &str) -> Option<String> {
+    let token = raw.trim();
+    if token.is_empty() {
+        return None;
+    }
+
+    if token.starts_with("ya29.") {
+        return Some(token.to_string());
+    }
+
+    if !token.starts_with('{') {
+        return None;
+    }
+
+    let payload: Value = serde_json::from_str(token).ok()?;
+    let candidates = [
+        payload.get("accessToken").and_then(Value::as_str),
+        payload.get("access_token").and_then(Value::as_str),
+        payload.get("token").and_then(Value::as_str),
+    ];
+
+    candidates
+        .iter()
+        .flatten()
+        .map(|v| v.trim())
+        .find(|v| !v.is_empty() && v.starts_with("ya29."))
+        .map(str::to_string)
 }
 
 async fn fetch_quota(
@@ -605,6 +661,12 @@ pub fn has_official_credentials(provider: &Provider) -> bool {
         .unwrap_or(false)
 }
 
+pub fn has_google_oauth_access_token(provider: &Provider) -> bool {
+    extract_env_map_from_provider(provider)
+        .map(|env| extract_quota_access_token(&env).is_some())
+        .unwrap_or(false)
+}
+
 fn extract_token_bundle_new_format(conn: &Connection) -> Option<TokenBundle> {
     let value: String = conn
         .query_row(
@@ -783,26 +845,86 @@ fn inject_old_format_if_exists(
 fn restart_antigravity_best_effort() {
     #[cfg(target_os = "macos")]
     {
+        // 尝试无感知重载：后台拉起 deeplink -> 优雅退出 -> 后台重启 -> 再次触发 deeplink
+        let _ = std::process::Command::new("open")
+            .args(["-g", "antigravity://"])
+            .output();
+
+        let graceful_quit = std::process::Command::new("osascript")
+            .args(["-e", "tell application \"Antigravity\" to quit"])
+            .output()
+            .map(|o| o.status.success())
+            .unwrap_or(false);
+        if graceful_quit {
+            std::thread::sleep(std::time::Duration::from_millis(300));
+        }
+
+        let launched_hidden = std::process::Command::new("open")
+            .args(["-gj", "-a", "Antigravity"])
+            .output()
+            .map(|o| o.status.success())
+            .unwrap_or(false)
+            || std::process::Command::new("open")
+                .args(["-g", "-a", "Antigravity"])
+                .output()
+                .map(|o| o.status.success())
+                .unwrap_or(false);
+
+        if launched_hidden {
+            let _ = std::process::Command::new("open")
+                .args(["-g", "antigravity://"])
+                .output();
+            return;
+        }
+
+        // 兜底：沿用强制重启策略
         let _ = std::process::Command::new("pkill")
             .args(["-f", "Antigravity"])
             .output();
+        std::thread::sleep(std::time::Duration::from_millis(250));
         let _ = std::process::Command::new("open")
-            .arg("antigravity://")
+            .args(["-g", "antigravity://"])
             .output();
     }
 
     #[cfg(target_os = "windows")]
     {
+        // 优先后台拉起（尽量减少前台打扰）
+        let launched = std::process::Command::new("cmd")
+            .args(["/C", "start", "", "/min", "antigravity://"])
+            .output();
+        if launched
+            .as_ref()
+            .map(|o| o.status.success())
+            .unwrap_or(false)
+        {
+            return;
+        }
+
+        // 兜底：强制重启
         let _ = std::process::Command::new("cmd")
             .args(["/C", "taskkill /IM antigravity.exe /F"])
             .output();
         let _ = std::process::Command::new("cmd")
-            .args(["/C", "start antigravity://"])
+            .args(["/C", "start", "", "antigravity://"])
             .output();
     }
 
     #[cfg(target_os = "linux")]
     {
+        // 优先直接触发 deeplink
+        let launched = std::process::Command::new("xdg-open")
+            .arg("antigravity://")
+            .output();
+        if launched
+            .as_ref()
+            .map(|o| o.status.success())
+            .unwrap_or(false)
+        {
+            return;
+        }
+
+        // 兜底：强制重启
         let _ = std::process::Command::new("pkill")
             .args(["-f", "antigravity"])
             .output();

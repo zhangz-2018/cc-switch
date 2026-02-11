@@ -27,6 +27,7 @@ const QUOTA_API_URL: &str =
     "https://daily-cloudcode-pa.sandbox.googleapis.com/v1internal:fetchAvailableModels";
 const USERINFO_URL: &str = "https://www.googleapis.com/oauth2/v2/userinfo";
 const FALLBACK_PROJECT_ID: &str = "bamboo-precept-lgxtn";
+const SKIP_PROCESS_ACTIONS_ENV_KEY: &str = "CC_SWITCH_SKIP_ANTIGRAVITY_RESTART";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AntigravityImportedSession {
@@ -190,9 +191,16 @@ pub fn apply_account_from_provider(provider: &Provider) -> Result<(), AppError> 
         ));
     }
 
+    let previous_bundle = read_current_token_bundle_from_db(&db_path);
+    let should_restart = should_restart_for_account_switch(previous_bundle.as_ref(), &refresh_token);
+
     inject_token_to_antigravity_db(&db_path, &access_token, &refresh_token, expires_at, &email)?;
 
-    restart_antigravity_best_effort();
+    if should_restart {
+        restart_antigravity_best_effort();
+    } else {
+        notify_antigravity_reload_only();
+    }
 
     Ok(())
 }
@@ -843,6 +851,10 @@ fn inject_old_format_if_exists(
 }
 
 fn restart_antigravity_best_effort() {
+    if should_skip_antigravity_process_actions() {
+        return;
+    }
+
     #[cfg(target_os = "macos")]
     {
         // 尝试无感知重载：后台拉起 deeplink -> 优雅退出 -> 后台重启 -> 再次触发 deeplink
@@ -932,6 +944,65 @@ fn restart_antigravity_best_effort() {
             .arg("antigravity://")
             .output();
     }
+}
+
+fn should_skip_antigravity_process_actions() -> bool {
+    std::env::var(SKIP_PROCESS_ACTIONS_ENV_KEY)
+        .ok()
+        .map(|v| {
+            let normalized = v.trim().to_ascii_lowercase();
+            normalized == "1" || normalized == "true" || normalized == "yes"
+        })
+        .unwrap_or(false)
+}
+
+fn notify_antigravity_reload_only() {
+    if should_skip_antigravity_process_actions() {
+        return;
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        let _ = std::process::Command::new("open")
+            .args(["-g", "antigravity://"])
+            .output();
+    }
+
+    #[cfg(target_os = "windows")]
+    {
+        let _ = std::process::Command::new("cmd")
+            .args(["/C", "start", "", "/min", "antigravity://"])
+            .output();
+    }
+
+    #[cfg(target_os = "linux")]
+    {
+        let _ = std::process::Command::new("xdg-open")
+            .arg("antigravity://")
+            .output();
+    }
+}
+
+fn read_current_token_bundle_from_db(db_path: &Path) -> Option<TokenBundle> {
+    let conn = Connection::open(db_path).ok()?;
+    extract_token_bundle_new_format(&conn).or_else(|| extract_token_bundle_old_format(&conn))
+}
+
+fn should_restart_for_account_switch(
+    current_bundle: Option<&TokenBundle>,
+    incoming_refresh_token: &str,
+) -> bool {
+    let incoming_refresh_token = incoming_refresh_token.trim();
+    if incoming_refresh_token.is_empty() {
+        return true;
+    }
+
+    let Some(bundle) = current_bundle else {
+        return true;
+    };
+
+    let current_refresh_token = bundle.refresh_token.trim();
+    current_refresh_token.is_empty() || current_refresh_token != incoming_refresh_token
 }
 
 fn read_varint(data: &[u8], mut offset: usize) -> Result<(u64, usize), AppError> {
@@ -1084,4 +1155,41 @@ fn create_oauth_info(access_token: &str, refresh_token: &str, expires_at: i64) -
 fn create_oauth_field(access_token: &str, refresh_token: &str, expires_at: i64) -> Vec<u8> {
     let oauth_info = create_oauth_info(access_token, refresh_token, expires_at);
     encode_len_delimited_field(6, &oauth_info)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn mock_bundle(refresh_token: &str) -> TokenBundle {
+        TokenBundle {
+            access_token: "ya29.mock".to_string(),
+            refresh_token: refresh_token.to_string(),
+            expires_at: Utc::now().timestamp() + 3600,
+            email: Some("test@example.com".to_string()),
+        }
+    }
+
+    #[test]
+    fn should_restart_when_no_current_bundle() {
+        assert!(should_restart_for_account_switch(None, "refresh_a"));
+    }
+
+    #[test]
+    fn should_not_restart_when_switching_same_account() {
+        let current = mock_bundle("refresh_same");
+        assert!(!should_restart_for_account_switch(
+            Some(&current),
+            "refresh_same"
+        ));
+    }
+
+    #[test]
+    fn should_restart_when_switching_different_account() {
+        let current = mock_bundle("refresh_old");
+        assert!(should_restart_for_account_switch(
+            Some(&current),
+            "refresh_new"
+        ));
+    }
 }

@@ -12,6 +12,7 @@ use crate::proxy::{
     ProxyError,
 };
 use axum::http::HeaderMap;
+use serde_json::Value;
 use std::time::Instant;
 
 /// 流式超时配置
@@ -57,6 +58,8 @@ pub struct RequestContext {
     pub app_type: AppType,
     /// Session ID（从客户端请求提取或新生成）
     pub session_id: String,
+    /// 原始请求体（用于会话记忆与审计，不包含后续注入内容）
+    pub request_body: Value,
     /// 整流器配置
     pub rectifier_config: RectifierConfig,
 }
@@ -155,6 +158,7 @@ impl RequestContext {
             app_type_str,
             app_type,
             session_id,
+            request_body: body.clone(),
             rectifier_config,
         })
     }

@@ -192,7 +192,8 @@ pub fn apply_account_from_provider(provider: &Provider) -> Result<(), AppError> 
     }
 
     let previous_bundle = read_current_token_bundle_from_db(&db_path);
-    let should_restart = should_restart_for_account_switch(previous_bundle.as_ref(), &refresh_token);
+    let should_restart =
+        should_restart_for_account_switch(previous_bundle.as_ref(), &refresh_token);
 
     inject_token_to_antigravity_db(&db_path, &access_token, &refresh_token, expires_at, &email)?;
 
@@ -208,14 +209,13 @@ pub fn apply_account_from_provider(provider: &Provider) -> Result<(), AppError> 
 pub async fn query_usage_from_provider(provider: &Provider) -> Result<UsageResult, AppError> {
     let env_map = extract_env_map_from_provider(provider)?;
 
-    let access_token = extract_quota_access_token(&env_map)
-        .ok_or_else(|| {
-            AppError::localized(
-                "gemini.oauth.missing_access_token",
-                "缺少可用 OAuth Access Token，无法查询模型余量",
-                "Missing OAuth access token, cannot query model quota",
-            )
-        })?;
+    let access_token = extract_quota_access_token(&env_map).ok_or_else(|| {
+        AppError::localized(
+            "gemini.oauth.missing_access_token",
+            "缺少可用 OAuth Access Token，无法查询模型余量",
+            "Missing OAuth access token, cannot query model quota",
+        )
+    })?;
 
     let email = if let Some(v) = extract_quota_email(&env_map) {
         v
@@ -271,14 +271,13 @@ pub async fn fetch_quota_from_provider(
 ) -> Result<AntigravityQuotaResponse, AppError> {
     let env_map = extract_env_map_from_provider(provider)?;
 
-    let access_token = extract_quota_access_token(&env_map)
-        .ok_or_else(|| {
-            AppError::localized(
-                "gemini.oauth.missing_access_token",
-                "缺少可用 OAuth Access Token，无法查询模型余量",
-                "Missing OAuth access token, cannot query model quota",
-            )
-        })?;
+    let access_token = extract_quota_access_token(&env_map).ok_or_else(|| {
+        AppError::localized(
+            "gemini.oauth.missing_access_token",
+            "缺少可用 OAuth Access Token，无法查询模型余量",
+            "Missing OAuth access token, cannot query model quota",
+        )
+    })?;
 
     let email = if let Some(v) = extract_quota_email(&env_map) {
         v
@@ -1249,7 +1248,8 @@ mod tests {
             Some("https://ai.google.dev/".to_string()),
         );
 
-        let env_map = extract_env_map_from_provider(&provider).expect("should parse env from string");
+        let env_map =
+            extract_env_map_from_provider(&provider).expect("should parse env from string");
         assert_eq!(
             env_map.get("GOOGLE_OAUTH_ACCESS_TOKEN").map(String::as_str),
             Some("ya29.test")

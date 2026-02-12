@@ -7,6 +7,7 @@ use super::{
     provider_router::ProviderRouter, types::*, ProxyError,
 };
 use crate::database::Database;
+use crate::services::thread_memory::ThreadMemoryService;
 use axum::{
     extract::DefaultBodyLimit,
     routing::{get, post},
@@ -33,6 +34,8 @@ pub struct ProxyState {
     pub app_handle: Option<tauri::AppHandle>,
     /// 故障转移切换管理器
     pub failover_manager: Arc<FailoverSwitchManager>,
+    /// 本地线程记忆（Neo4j，可选）
+    pub thread_memory: Option<Arc<ThreadMemoryService>>,
 }
 
 /// 代理HTTP服务器
@@ -54,6 +57,7 @@ impl ProxyServer {
         let provider_router = Arc::new(ProviderRouter::new(db.clone()));
         // 创建故障转移切换管理器
         let failover_manager = Arc::new(FailoverSwitchManager::new(db.clone()));
+        let thread_memory = ThreadMemoryService::from_env().map(Arc::new);
 
         let state = ProxyState {
             db,
@@ -64,6 +68,7 @@ impl ProxyServer {
             provider_router,
             app_handle,
             failover_manager,
+            thread_memory,
         };
 
         Self {

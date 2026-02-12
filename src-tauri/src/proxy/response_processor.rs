@@ -9,6 +9,7 @@ use super::{
     usage::parser::TokenUsage,
     ProxyError,
 };
+use crate::services::thread_memory::ThreadMemoryService;
 use axum::response::{IntoResponse, Response};
 use bytes::Bytes;
 use futures::stream::{Stream, StreamExt};
@@ -113,14 +114,16 @@ pub async fn handle_non_streaming(
         String::from_utf8_lossy(&body_bytes)
     );
 
+    let parsed_json = serde_json::from_slice::<Value>(&body_bytes).ok();
+
     // 解析并记录使用量
-    if let Ok(json_value) = serde_json::from_slice::<Value>(&body_bytes) {
+    if let Some(json_value) = parsed_json.as_ref() {
         // 解析使用量
-        if let Some(usage) = (parser_config.response_parser)(&json_value) {
+        if let Some(usage) = (parser_config.response_parser)(json_value) {
             // 优先使用 usage 中解析出的模型名称，其次使用响应中的 model 字段，最后回退到请求模型
             let model = if let Some(ref m) = usage.model {
                 m.clone()
-            } else if let Some(m) = json_value.get("model").and_then(|m| m.as_str()) {
+            } else if let Some(m) = json_value.get("model").and_then(Value::as_str) {
                 m.to_string()
             } else {
                 ctx.request_model.clone()
@@ -138,7 +141,7 @@ pub async fn handle_non_streaming(
         } else {
             let model = json_value
                 .get("model")
-                .and_then(|m| m.as_str())
+                .and_then(Value::as_str)
                 .unwrap_or(&ctx.request_model)
                 .to_string();
             spawn_log_usage(
@@ -171,6 +174,8 @@ pub async fn handle_non_streaming(
             false,
         );
     }
+
+    spawn_thread_memory_write_from_json(state, ctx, status.as_u16(), parsed_json.as_ref());
 
     // 构建响应
     let mut builder = axum::response::Response::builder().status(status);
@@ -292,6 +297,11 @@ fn create_usage_collector(
     let stream_parser = parser_config.stream_parser;
     let model_extractor = parser_config.model_extractor;
     let session_id = ctx.session_id.clone();
+    let thread_memory = state.thread_memory.clone();
+    let app_type_for_memory = app_type_str.to_string();
+    let provider_id_for_memory = provider_id.clone();
+    let request_text_for_memory =
+        ThreadMemoryService::extract_user_text_from_request(app_type_str, &ctx.request_body);
 
     SseUsageCollector::new(start_time, move |events, first_token_ms| {
         if let Some(usage) = stream_parser(&events) {
@@ -344,6 +354,34 @@ fn create_usage_collector(
                 .await;
             });
             log::debug!("[{tag}] 流式响应缺少 usage 统计，跳过消费记录");
+        }
+
+        if let Some(memory) = thread_memory.clone() {
+            if status_code < 400 {
+                let response_text =
+                    ThreadMemoryService::extract_assistant_text_from_sse_events(&events);
+                if request_text_for_memory.is_some() || response_text.is_some() {
+                    let app_type = app_type_for_memory.clone();
+                    let session_id = session_id.clone();
+                    let provider_id = provider_id_for_memory.clone();
+                    let request_text = request_text_for_memory.clone();
+
+                    tokio::spawn(async move {
+                        if let Err(e) = memory
+                            .persist_exchange(
+                                &app_type,
+                                &session_id,
+                                &provider_id,
+                                request_text.as_deref(),
+                                response_text.as_deref(),
+                            )
+                            .await
+                        {
+                            log::debug!("[{app_type}] 写入 Neo4j 线程记忆失败（已降级）: {e}");
+                        }
+                    });
+                }
+            }
         }
     })
 }
@@ -439,6 +477,50 @@ async fn log_usage_internal(
     ) {
         log::warn!("[USG-001] 记录使用量失败: {e}");
     }
+}
+
+fn spawn_thread_memory_write_from_json(
+    state: &ProxyState,
+    ctx: &RequestContext,
+    status_code: u16,
+    json_value: Option<&Value>,
+) {
+    if status_code >= 400 {
+        return;
+    }
+
+    let Some(memory) = state.thread_memory.clone() else {
+        return;
+    };
+
+    let request_text =
+        ThreadMemoryService::extract_user_text_from_request(ctx.app_type_str, &ctx.request_body);
+    let response_text = json_value.and_then(|value| {
+        ThreadMemoryService::extract_assistant_text_from_response(ctx.app_type_str, value)
+    });
+
+    if request_text.is_none() && response_text.is_none() {
+        return;
+    }
+
+    let app_type = ctx.app_type_str.to_string();
+    let session_id = ctx.session_id.clone();
+    let provider_id = ctx.provider.id.clone();
+
+    tokio::spawn(async move {
+        if let Err(e) = memory
+            .persist_exchange(
+                &app_type,
+                &session_id,
+                &provider_id,
+                request_text.as_deref(),
+                response_text.as_deref(),
+            )
+            .await
+        {
+            log::debug!("[{app_type}] 写入 Neo4j 线程记忆失败（已降级）: {e}");
+        }
+    });
 }
 
 /// 创建带日志记录和超时控制的透传流
@@ -586,6 +668,7 @@ mod tests {
             provider_router: Arc::new(ProviderRouter::new(db.clone())),
             app_handle: None,
             failover_manager: Arc::new(FailoverSwitchManager::new(db)),
+            thread_memory: None,
         }
     }
 

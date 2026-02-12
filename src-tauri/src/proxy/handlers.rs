@@ -275,7 +275,10 @@ pub async fn handle_chat_completions(
     let mut ctx =
         RequestContext::new(&state, &body, &headers, AppType::Codex, "Codex", "codex").await?;
 
-    let is_stream = body
+    let mut forward_body = body;
+    try_inject_local_thread_context(&state, &ctx, "/chat/completions", &mut forward_body).await;
+
+    let is_stream = forward_body
         .get("stream")
         .and_then(|v| v.as_bool())
         .unwrap_or(false);
@@ -285,7 +288,7 @@ pub async fn handle_chat_completions(
         .forward_with_retry(
             &AppType::Codex,
             "/chat/completions",
-            body,
+            forward_body,
             headers,
             ctx.get_providers(),
         )
@@ -316,7 +319,10 @@ pub async fn handle_responses(
     let mut ctx =
         RequestContext::new(&state, &body, &headers, AppType::Codex, "Codex", "codex").await?;
 
-    let is_stream = body
+    let mut forward_body = body;
+    try_inject_local_thread_context(&state, &ctx, "/responses", &mut forward_body).await;
+
+    let is_stream = forward_body
         .get("stream")
         .and_then(|v| v.as_bool())
         .unwrap_or(false);
@@ -326,7 +332,7 @@ pub async fn handle_responses(
         .forward_with_retry(
             &AppType::Codex,
             "/responses",
-            body,
+            forward_body,
             headers,
             ctx.get_providers(),
         )
@@ -346,6 +352,38 @@ pub async fn handle_responses(
     let response = result.response;
 
     process_response(response, &ctx, &state, &CODEX_PARSER_CONFIG).await
+}
+
+async fn try_inject_local_thread_context(
+    state: &ProxyState,
+    ctx: &RequestContext,
+    endpoint: &str,
+    body: &mut Value,
+) {
+    let Some(memory) = state.thread_memory.as_ref() else {
+        return;
+    };
+
+    if !memory.inject_context_enabled() {
+        return;
+    }
+
+    match memory
+        .build_context(ctx.app_type_str, &ctx.session_id)
+        .await
+    {
+        Ok(Some(context)) => {
+            memory.inject_context_for_codex(endpoint, body, &context);
+        }
+        Ok(None) => {}
+        Err(e) => {
+            log::debug!(
+                "[{}] 读取本地线程记忆失败，已降级为原始请求: {}",
+                ctx.tag,
+                e
+            );
+        }
+    }
 }
 
 // ============================================================================

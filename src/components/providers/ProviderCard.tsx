@@ -93,12 +93,24 @@ const formatResetTime = (resetAt: number) => {
   const diffMs = resetAt * 1000 - Date.now();
   if (diffMs <= 0) return "即将重置";
   const minutes = Math.floor(diffMs / 60000);
+  const days = Math.floor(minutes / (24 * 60));
   const hours = Math.floor(minutes / 60);
   const mins = minutes % 60;
+  if (days > 0) {
+    return `${days}d ${hours % 24}h`;
+  }
   if (hours > 0) {
     return `${hours}h ${mins}m`;
   }
   return `${mins}m`;
+};
+
+const formatRemainingPercent = (usedPercent?: number) => {
+  if (typeof usedPercent !== "number" || Number.isNaN(usedPercent)) {
+    return "--";
+  }
+  const remaining = Math.max(0, Math.min(100, 100 - usedPercent));
+  return remaining;
 };
 
 const formatUsageRefreshedAt = (timestamp: number) => {
@@ -369,22 +381,44 @@ export function ProviderCard({
                       {t("provider.codexQuota5h", {
                         defaultValue: "5h",
                       })}
-                      : {codexQuota?.fiveHour?.usedPercent ?? "--"}%
+                      {t("provider.codexQuotaRemaining", {
+                        defaultValue: "剩余",
+                      })}
+                      : {formatRemainingPercent(codexQuota?.fiveHour?.usedPercent)}%
                     </span>
                     <span>
                       {t("provider.codexQuotaWeek", {
                         defaultValue: "周",
                       })}
-                      : {codexQuota?.weekly?.usedPercent ?? "--"}%
+                      {t("provider.codexQuotaRemaining", {
+                        defaultValue: "剩余",
+                      })}
+                      : {formatRemainingPercent(codexQuota?.weekly?.usedPercent)}%
                     </span>
-                    {codexQuota?.fiveHour?.resetAt ? (
-                      <span>
-                        {t("provider.codexQuotaReset", {
-                          defaultValue: "重置",
-                        })}
-                        : {formatResetTime(codexQuota.fiveHour.resetAt)}
-                      </span>
-                    ) : null}
+                    <span>
+                      {t("provider.codexQuota5h", {
+                        defaultValue: "5h",
+                      })}
+                      {t("provider.codexQuotaReset", {
+                        defaultValue: "重置",
+                      })}
+                      :{" "}
+                      {codexQuota?.fiveHour?.resetAt
+                        ? formatResetTime(codexQuota.fiveHour.resetAt)
+                        : "--"}
+                    </span>
+                    <span>
+                      {t("provider.codexQuotaWeek", {
+                        defaultValue: "周",
+                      })}
+                      {t("provider.codexQuotaReset", {
+                        defaultValue: "重置",
+                      })}
+                      :{" "}
+                      {codexQuota?.weekly?.resetAt
+                        ? formatResetTime(codexQuota.weekly.resetAt)
+                        : "--"}
+                    </span>
                   </>
                 )}
               </div>

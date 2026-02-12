@@ -574,24 +574,66 @@ fn fetch_user_email_sync(access_token: &str) -> Result<String, AppError> {
 }
 
 fn extract_env_map_from_provider(provider: &Provider) -> Result<HashMap<String, String>, AppError> {
-    let env_obj = provider
-        .settings_config
-        .get("env")
-        .and_then(Value::as_object)
-        .ok_or_else(|| {
-            AppError::localized(
-                "antigravity.provider.invalid_env",
-                "Gemini 配置格式错误：缺少 env 配置",
-                "Invalid Gemini settings: missing env object",
-            )
-        })?;
+    fn parse_env_object(settings: &Value) -> HashMap<String, String> {
+        let mut env_map = HashMap::new();
+        if let Some(env_obj) = settings.get("env").and_then(Value::as_object) {
+            for (k, v) in env_obj {
+                if let Some(s) = v.as_str() {
+                    env_map.insert(k.clone(), s.to_string());
+                }
+            }
+        }
+        env_map
+    }
 
-    let mut env_map = HashMap::new();
-    for (k, v) in env_obj {
-        if let Some(s) = v.as_str() {
-            env_map.insert(k.clone(), s.to_string());
+    fn fill_from_root_known_keys(settings: &Value, env_map: &mut HashMap<String, String>) {
+        const KNOWN_KEYS: [&str; 9] = [
+            ANTIGRAVITY_ACCESS_TOKEN_KEY,
+            ANTIGRAVITY_REFRESH_TOKEN_KEY,
+            ANTIGRAVITY_EMAIL_KEY,
+            ANTIGRAVITY_EXPIRES_AT_KEY,
+            ANTIGRAVITY_PROJECT_ID_KEY,
+            GOOGLE_OAUTH_ACCESS_TOKEN_KEY,
+            GOOGLE_OAUTH_EMAIL_KEY,
+            GOOGLE_OAUTH_PROJECT_ID_KEY,
+            "GEMINI_API_KEY",
+        ];
+
+        if let Some(obj) = settings.as_object() {
+            for key in KNOWN_KEYS {
+                if env_map.contains_key(key) {
+                    continue;
+                }
+                if let Some(value) = obj.get(key).and_then(Value::as_str) {
+                    env_map.insert(key.to_string(), value.to_string());
+                }
+            }
         }
     }
+
+    let mut env_map = parse_env_object(&provider.settings_config);
+    fill_from_root_known_keys(&provider.settings_config, &mut env_map);
+
+    // 兼容历史异常数据：settingsConfig 可能被错误存成 JSON 字符串
+    if env_map.is_empty() {
+        if let Some(raw) = provider.settings_config.as_str() {
+            if raw.trim().starts_with('{') {
+                if let Ok(parsed) = serde_json::from_str::<Value>(raw) {
+                    env_map = parse_env_object(&parsed);
+                    fill_from_root_known_keys(&parsed, &mut env_map);
+                }
+            }
+        }
+    }
+
+    if env_map.is_empty() {
+        return Err(AppError::localized(
+            "antigravity.provider.invalid_env",
+            "Gemini 配置格式错误：缺少 env 配置",
+            "Invalid Gemini settings: missing env object",
+        ));
+    }
+
     Ok(env_map)
 }
 
@@ -1160,6 +1202,8 @@ fn create_oauth_field(access_token: &str, refresh_token: &str, expires_at: i64) 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::provider::Provider;
+    use serde_json::json;
 
     fn mock_bundle(refresh_token: &str) -> TokenBundle {
         TokenBundle {
@@ -1191,5 +1235,53 @@ mod tests {
             Some(&current),
             "refresh_new"
         ));
+    }
+
+    #[test]
+    fn should_extract_env_from_string_settings_config() {
+        let provider = Provider::with_id(
+            "p1".to_string(),
+            "Google Official".to_string(),
+            Value::String(
+                r#"{"env":{"GOOGLE_OAUTH_ACCESS_TOKEN":"ya29.test","GOOGLE_OAUTH_EMAIL":"user@example.com"}}"#
+                    .to_string(),
+            ),
+            Some("https://ai.google.dev/".to_string()),
+        );
+
+        let env_map = extract_env_map_from_provider(&provider).expect("should parse env from string");
+        assert_eq!(
+            env_map.get("GOOGLE_OAUTH_ACCESS_TOKEN").map(String::as_str),
+            Some("ya29.test")
+        );
+        assert_eq!(
+            env_map.get("GOOGLE_OAUTH_EMAIL").map(String::as_str),
+            Some("user@example.com")
+        );
+    }
+
+    #[test]
+    fn should_extract_root_level_oauth_keys() {
+        let provider = Provider::with_id(
+            "p2".to_string(),
+            "Google Official".to_string(),
+            json!({
+                "GOOGLE_OAUTH_ACCESS_TOKEN": "ya29.root",
+                "GOOGLE_OAUTH_EMAIL": "root@example.com",
+                "GEMINI_API_KEY": "ya29.root"
+            }),
+            Some("https://ai.google.dev/".to_string()),
+        );
+
+        let env_map = extract_env_map_from_provider(&provider).expect("should parse root keys");
+        assert_eq!(
+            env_map.get("GOOGLE_OAUTH_ACCESS_TOKEN").map(String::as_str),
+            Some("ya29.root")
+        );
+        assert_eq!(
+            env_map.get("GOOGLE_OAUTH_EMAIL").map(String::as_str),
+            Some("root@example.com")
+        );
+        assert_eq!(has_google_oauth_access_token(&provider), true);
     }
 }
